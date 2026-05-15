@@ -176,13 +176,21 @@ assertEqual(getMediaInfo(baseMessage), undefined, "text-only: no media");
 section("mediaPlaceholder");
 
 const fakePath = "/tmp/session/media/456-42-photo.jpg";
-assertIncludes(mediaPlaceholder("voice", baseMessage, fakePath), "no STT handler", "voice placeholder → STT note");
-assertIncludes(mediaPlaceholder("photo", baseMessage, fakePath), "no vision handler", "photo placeholder → vision note");
-assertIncludes(mediaPlaceholder("video", baseMessage, fakePath), "no handler", "video placeholder → handler note");
-assertIncludes(mediaPlaceholder("sticker", baseMessage, fakePath), "no handler", "sticker placeholder → handler note");
-assertIncludes(mediaPlaceholder("document", baseMessage, fakePath), "no handler", "document placeholder → handler note");
+assertIncludes(mediaPlaceholder("voice", baseMessage, fakePath), "🎙️", "voice placeholder → emoji");
+assertIncludes(mediaPlaceholder("voice", baseMessage, fakePath), "no transcription available", "voice placeholder → hint");
+assertIncludes(mediaPlaceholder("photo", baseMessage, fakePath), "🖼️", "photo placeholder → emoji");
+assertIncludes(mediaPlaceholder("photo", baseMessage, fakePath), "no description available", "photo placeholder → hint");
+assertIncludes(mediaPlaceholder("video", baseMessage, fakePath), "🎬", "video placeholder → emoji");
+assertIncludes(mediaPlaceholder("video", baseMessage, fakePath), "no description available", "video placeholder → hint");
+assertIncludes(mediaPlaceholder("sticker", baseMessage, fakePath), "🎭", "sticker placeholder → emoji");
+assertIncludes(mediaPlaceholder("sticker", baseMessage, fakePath), fakePath, "sticker placeholder → file path");
+assertIncludes(mediaPlaceholder("document", baseMessage, fakePath), "📄", "document placeholder → emoji");
+assertIncludes(mediaPlaceholder("document", baseMessage, fakePath), "you can read the file", "document placeholder → hint");
+assertIncludes(mediaPlaceholder("animation", baseMessage, fakePath), "🎞️", "animation placeholder → emoji");
 assertIncludes(mediaPlaceholder("animation", baseMessage, fakePath), fakePath, "animation placeholder → file path");
+assertIncludes(mediaPlaceholder("audio", baseMessage, fakePath), "🎵", "audio placeholder → emoji");
 assertIncludes(mediaPlaceholder("audio", baseMessage, fakePath), fakePath, "audio placeholder → file path");
+assertIncludes(mediaPlaceholder("video_note", baseMessage, fakePath), "🎬", "video_note placeholder → emoji");
 assertIncludes(mediaPlaceholder("video_note", baseMessage, fakePath), fakePath, "video_note placeholder → file path");
 
 section("detectContentTypes");

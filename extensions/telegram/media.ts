@@ -4,6 +4,7 @@
 
 import type { TelegramApi } from "./api.js";
 import type { Message, MediaType, MediaProcessor } from "./types.js";
+import { mediaEmoji, mediaLabel, mediaNoProcessorHint } from "./formatting.js";
 import { execFile } from "node:child_process";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -120,18 +121,12 @@ export async function downloadMediaFile(
 }
 
 /** Build a placeholder string for a media type with no processor configured.
+ *  Format: `<EMOJI> <FILEPATH>\n[No <type> handler configured — <hint>]`
  *  localPath is the downloaded file path so the agent can still access it. */
-export function mediaPlaceholder(type: MediaType, message: Message, localPath: string): string {
-	switch (type) {
-		case "voice": return `🎤 [voice message — no STT handler configured, audio file at: ${localPath}]`;
-		case "audio": return `🎵 [audio file — no handler configured, file at: ${localPath}]`;
-		case "photo": return `📷 [photo — no vision handler configured, image file at: ${localPath}]`;
-		case "video": return `🎬 [video — no handler configured, file at: ${localPath}]`;
-		case "video_note": return `🎬 [video note — no handler configured, file at: ${localPath}]`;
-		case "animation": return `🎞️ [animation — no handler configured, file at: ${localPath}]`;
-		case "document": return `📄 [document: ${message.document?.file_name ?? "file"} (${message.document?.mime_type ?? "unknown"}) — no handler configured, file at: ${localPath}]`;
-		case "sticker": return `🏷️ [sticker: ${message.sticker?.emoji ?? "🫥"} — no handler configured, image file at: ${localPath}]`;
-	}
+export function mediaPlaceholder(type: MediaType, _message: Message, localPath: string): string {
+	const emoji = mediaEmoji(type);
+	const hint = mediaNoProcessorHint(type);
+	return `${emoji} ${localPath}\n[No ${mediaLabel(type)} handler configured — ${hint}]`;
 }
 
 // ── Protocol Handlers ────────────────────────────────────────────────────────

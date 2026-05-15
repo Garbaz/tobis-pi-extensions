@@ -1,7 +1,7 @@
 // ── Telegram Message Formatting ──────────────────────────────────────────────
 // Helpers for extracting and formatting incoming Telegram messages.
 
-import type { Message, Location, Venue, Contact, Dice, Poll } from "./types.js";
+import type { Message, Location, Venue, Contact, Dice, Poll, MediaType } from "./types.js";
 
 /** Format a text message from Telegram for Pi. No prefix — the system prompt tells the agent the source. */
 export function formatIncomingText(text: string, isEdit: boolean): string {
@@ -21,6 +21,44 @@ export function senderName(message: Message): string | undefined {
 
 /** Content types detectable in a Telegram message. */
 export type ContentType = "text" | "voice" | "audio" | "photo" | "video" | "video_note" | "animation" | "document" | "sticker" | "location" | "contact" | "dice" | "poll" | "caption";
+
+/** Emoji for each media type — used in formatted output and status bar. */
+export function mediaEmoji(type: MediaType): string {
+	switch (type) {
+		case "voice": return "🎙️";
+		case "audio": return "🎵";
+		case "photo": return "🖼️";
+		case "sticker": return "🎭";
+		case "video": return "🎬";
+		case "video_note": return "🎬";
+		case "animation": return "🎞️";
+		case "document": return "📄";
+	}
+}
+
+/** Human-readable label for a media type. */
+export function mediaLabel(type: MediaType): string {
+	switch (type) {
+		case "voice": return "voice message";
+		case "audio": return "audio";
+		case "photo": return "photo";
+		case "sticker": return "sticker";
+		case "video": return "video";
+		case "video_note": return "video note";
+		case "animation": return "animation";
+		case "document": return "document";
+	}
+}
+
+/** Hint for when no processor is configured, telling the agent what it can do. */
+export function mediaNoProcessorHint(type: MediaType): string {
+	switch (type) {
+		case "voice": case "audio": return "no transcription available";
+		case "photo": case "sticker": case "animation": return "no description available; you can read the image file if the model supports vision";
+		case "video": case "video_note": return "no description available";
+		case "document": return "you can read the file depending on its format";
+	}
+}
 
 /** Detect which content types are present in a Telegram message. */
 export function detectContentTypes(message: Message): ContentType[] {

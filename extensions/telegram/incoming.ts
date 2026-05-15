@@ -5,7 +5,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TelegramApi } from "./api.js";
 import type { Message, CallbackQuery, ChatMemberUpdated, Update, TelegramConfig, MediaType } from "./types.js";
-import { formatIncomingText, extractText, senderName, detectContentTypes, formatLocation, formatVenue, formatContact, formatDice, formatPoll } from "./formatting.js";
+import { formatIncomingText, extractText, senderName, detectContentTypes, formatLocation, formatVenue, formatContact, formatDice, formatPoll, mediaEmoji, mediaLabel } from "./formatting.js";
 import { getMediaDir, getMediaInfo, downloadMediaFile, processMedia, mediaPlaceholder } from "./media.js";
 
 /** Result of formatting a message for Pi consumption. */
@@ -194,13 +194,15 @@ async function formatMessageContent(
 	const mediaInfo = getMediaInfo(message);
 	if (mediaInfo) {
 		const processor = config.media?.[mediaInfo.type];
-		const caption = message.caption ? `\n${message.caption}` : "";
+		const caption = message.caption ? `\nCaption: ${message.caption}` : "";
+		const emoji = mediaEmoji(mediaInfo.type);
+		let localPath: string | undefined;
 
 		try {
 			// Always download the file so the agent can access it
 			const sessionDir = ctx.sessionManager.getSessionDir();
 			const mediaDir = await getMediaDir(sessionDir);
-			const localPath = await downloadMediaFile(
+			localPath = await downloadMediaFile(
 				api,
 				mediaInfo.fileId,
 				mediaInfo.type,
@@ -212,21 +214,29 @@ async function formatMessageContent(
 			);
 
 			if (!processor) {
-				// No processor configured — provide the file with a note
+				// No processor configured — file path + hint
 				unprocessed.push(mediaInfo.type);
 				return { text: formatIncomingText(mediaPlaceholder(mediaInfo.type, message, localPath) + caption, isEdit), unprocessed };
 			}
 
+			// Show processing indicator in status bar
+			const theme = ctx.ui.theme;
+			const label = theme.fg("accent", "tg");
+			ctx.ui.setStatus("telegram", `${label} ${emoji} processing ${mediaLabel(mediaInfo.type)}…`);
+
 			const result = await processMedia(processor, localPath);
 
-			const isAudio = mediaInfo.type === "voice" || mediaInfo.type === "audio";
-			if (isAudio) {
-				return { text: `🎤 Transcription:\n${result}\n\n[Audio file: ${localPath}]${caption}`, unprocessed };
-			}
-			return { text: `📎 ${result}${caption}\n\n[File: ${localPath}]`, unprocessed };
+			// Clear processing indicator
+			ctx.ui.setStatus("telegram", undefined);
+
+			// Consistent layout: emoji + filepath, then processor output on next line
+			return { text: formatIncomingText(`${emoji} ${localPath}\n${result}${caption}`, isEdit), unprocessed };
 		} catch (err) {
+			// Clear processing indicator on error too
+			ctx.ui.setStatus("telegram", undefined);
 			const msg = err instanceof Error ? err.message : String(err);
-			return { text: formatIncomingText(`[${mediaInfo.type}: processing failed: ${msg}]${caption}`, isEdit), unprocessed };
+			const pathInfo = localPath ? `${emoji} ${localPath}\n` : `${emoji} `;
+			return { text: formatIncomingText(`${pathInfo}[Processing failed: ${msg}]${caption}`, isEdit), unprocessed };
 		}
 	}
 
