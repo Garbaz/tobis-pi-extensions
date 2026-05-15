@@ -13,6 +13,11 @@ Custom pi extensions by Tobi.
 2. Add `"./extensions/<name>/index.ts"` to `package.json` → `pi.extensions`
 3. Update `README.md`
 
+## Current extensions
+
+- **telegram** — companion for `@llblab/pi-telegram` (reactions, draft preview, outbound handlers)
+- **permissions** — companion for `@gotgenes/pi-permission-system` (dual-prompt bridge, runtime patching)
+
 ## Conventions
 
 - Each extension is independently filterable via package filtering in settings

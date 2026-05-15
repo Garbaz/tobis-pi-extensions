@@ -15,7 +15,8 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/telegram/index.ts"
+      "./extensions/telegram/index.ts",
+    "./extensions/permissions/index.ts"
     ]
   }
 }
