@@ -90,6 +90,10 @@ export class TelegramBridge {
 	lockToChat(chatId: number): void {
 		this.activeChatId = chatId;
 		this.activeOutgoing.setActiveChatId(chatId);
+		// All session-specific handlers share the same chat (private chat with the bot)
+		for (const outgoing of this.outgoingBySession.values()) {
+			outgoing.setActiveChatId(chatId);
+		}
 		if (this.topicManager) {
 			this.topicManager.setChatId(chatId);
 		}
@@ -132,7 +136,7 @@ export class TelegramBridge {
 		if (threadId !== undefined) {
 			// Create an outgoing handler for this session
 			const outgoing = new OutgoingHandler(this.api);
-			outgoing.setActiveChatId(this.activeChatId!);
+			if (this.activeChatId) outgoing.setActiveChatId(this.activeChatId);
 			outgoing.setThreadId(threadId);
 			this.outgoingBySession.set(sessionId, outgoing);
 		}
