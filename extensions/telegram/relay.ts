@@ -16,9 +16,9 @@
 //   state.json   — lastUpdateId polling cursor (moved from /tmp)
 
 import { createServer, createConnection, type Server, type Socket } from "node:net";
-import { readFile, writeFile, mkdir, unlink, access } from "node:fs/promises";
+import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { open, type FileHandle } from "node:fs/promises";
 import type { Update, Message } from "./types.js";
 
@@ -29,8 +29,28 @@ export const RELAY_SOCKET_PATH = join(RUN_DIR, "relay.sock");
 const RELAY_LOCK_PATH = join(RUN_DIR, "relay.lock");
 export const STATE_PATH = join(RUN_DIR, "state.json");
 
+/** Legacy state path (pre-relay, in /tmp). Used for migration. */
+const OLD_STATE_PATH = join(tmpdir(), "pi-telegram-state.json");
+
 async function ensureRunDir(): Promise<void> {
 	await mkdir(RUN_DIR, { recursive: true });
+}
+
+/** Migrate state file from /tmp to ~/.pi/run/telegram/ if the new location doesn't exist yet. */
+async function migrateStateFile(): Promise<void> {
+	try {
+		await readFile(STATE_PATH, "utf8");
+		return; // New location exists — no migration needed
+	} catch {
+		// New location doesn't exist — try to migrate from old location
+	}
+	try {
+		const oldData = await readFile(OLD_STATE_PATH, "utf8");
+		await writeFile(STATE_PATH, oldData, "utf8");
+		console.log("[telegram] Migrated state file from", OLD_STATE_PATH, "to", STATE_PATH);
+	} catch {
+		// Old file doesn't exist either — nothing to migrate
+	}
 }
 
 // ── Wire Protocol (JSON-lines over Unix socket) ──────────────────────────────
@@ -171,6 +191,7 @@ export async function readRelayLockPid(): Promise<number | undefined> {
 /** Read lastUpdateId from state file. Returns undefined if no state exists. */
 export async function readLastUpdateId(): Promise<number | undefined> {
 	await ensureRunDir();
+	await migrateStateFile();
 	try {
 		const raw = JSON.parse(await readFile(STATE_PATH, "utf8"));
 		return typeof raw.lastUpdateId === "number" ? raw.lastUpdateId : undefined;
@@ -291,6 +312,15 @@ export class RelayServer {
 				this.send(socket, { type: "update", threadId, data: update });
 			}
 		}
+	}
+
+	/** Whether any client is subscribed to this thread ID. */
+	hasSubscriber(threadId: number): boolean {
+		for (const [, client] of this.clients) {
+			if (client.subscriptions.has(threadId)) return true;
+			if (threadId === 0 && client.subscribedGeneral) return true;
+		}
+		return false;
 	}
 
 	/** Broadcast the current polling cursor to all clients (for failover). */

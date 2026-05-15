@@ -318,10 +318,27 @@ async function startAsRelay(ctx: ExtensionCommandContext | ExtensionContext): Pr
 			if (update.update_id >= (lastUpdateId ?? 0)) {
 				lastUpdateId = update.update_id + 1;
 			}
-			// Process locally
-			await bridge!.handleUpdate(update, ctx);
-			// Route to relay clients
+
+			// Route to relay clients first
 			relayServer?.routeUpdate(update);
+
+			// Process locally ONLY if no client owns this thread.
+			// If a client is subscribed to this thread, they handle it — we skip
+			// to avoid duplicate processing (reactions, replies, etc.)
+			const threadId = update.message?.message_thread_id
+				?? update.edited_message?.message_thread_id
+				?? 0;
+			const hasClientSubscriber = relayServer?.hasSubscriber(threadId) ?? false;
+
+			// my_chat_member updates (pairing/unblocking) are always processed locally
+			// AND broadcast to clients — both sides need them
+			if (hasClientSubscriber && !update.my_chat_member) {
+				// Client handles this — skip local processing
+				return;
+			}
+
+			await bridge!.handleUpdate(update, ctx);
+
 			// Broadcast cursor so clients can save it for failover
 			if (lastUpdateId !== undefined) {
 				relayServer?.broadcastCursor(lastUpdateId);
@@ -377,7 +394,7 @@ async function startAsClient(ctx: ExtensionCommandContext | ExtensionContext): P
 		const mode = isRelay ? " (relay)" : " (client)";
 		if (topicsEnabled) {
 			ctx.ui.notify(`Telegram: connected as @${botUsername} (topics enabled)${mode}`, "info");
-			} else if (config.topics === false) {
+		} else if (config.topics === false) {
 			ctx.ui.notify(`Telegram: connected as @${botUsername} (topics disabled in config)${mode}`, "info");
 		} else {
 			ctx.ui.notify(`Telegram: connected as @${botUsername} (topics unavailable — enable via BotFather)${mode}`, "info");
