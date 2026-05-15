@@ -451,7 +451,10 @@ export class RelayClient {
 						this.pingInterval = undefined;
 					}
 					console.warn("[telegram-relay] Disconnected from relay server");
-					this.onDisconnect?.();
+					// Guard against double-fire
+					const cb = this.onDisconnect;
+					this.onDisconnect = undefined;
+					cb?.();
 				});
 
 				socket.on("error", (err) => {
@@ -535,8 +538,11 @@ export class RelayClient {
 			case "bye":
 				// Relay is shutting down — trigger failover
 				console.warn("[telegram-relay] Relay server is shutting down");
+				// Clear onDisconnect before disconnect to prevent double-fire from close event
+				const cb = this.onDisconnect;
+				this.onDisconnect = undefined;
 				this.disconnect();
-				this.onDisconnect?.();
+				cb?.();
 				break;
 		}
 	}
