@@ -104,6 +104,8 @@ let botUsername: string | undefined;
 let topicsEnabled: boolean = false;
 /** The current session's ID (set on session_start, cleared on session_shutdown). */
 let currentSessionId: string | undefined;
+/** The last known session label (to detect renames). */
+let lastSessionLabel: string | undefined;
 
 // ── Status Bar ───────────────────────────────────────────────────────────────
 // Strategy: only show status for states that need attention.
@@ -367,6 +369,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		// Create a forum topic for this session (if topics are enabled and we're connected)
 		if (currentSessionId && bridge && bridge.getTopicManager() && config.allowedUserId) {
 			const label = getSessionLabel(ctx);
+			lastSessionLabel = label;
 			const threadId = await bridge.registerSession(currentSessionId, label);
 			if (threadId !== undefined) {
 				ctx.ui.notify(`Telegram: created topic "${label}"`, "info");
@@ -391,6 +394,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		bridge?.unlock();
 		botUsername = undefined;
 		currentSessionId = undefined;
+		lastSessionLabel = undefined;
 		// Persist polling cursor so we resume cleanly
 		if (lastUpdateId !== undefined) {
 			await saveLastUpdateId(lastUpdateId);
@@ -421,10 +425,19 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		return { systemPrompt: event.systemPrompt + buildTelegramPromptSuffix(telegramCtx) };
 	}) as never);
 
-	pi.on("agent_end", (async (event: { messages: unknown[] }, _ctx: ExtensionContext) => {
+	pi.on("agent_end", (async (event: { messages: unknown[] }, ctx: ExtensionContext) => {
 		bridge?.stopTypingIndicator();
 		await bridge?.flushPendingEdit();
-		await bridge?.onAgentEnd(event, _ctx);
+		await bridge?.onAgentEnd(event, ctx);
+
+		// Sync topic name if session name changed
+		if (currentSessionId && bridge?.getTopicManager() && config.allowedUserId) {
+			const label = getSessionLabel(ctx);
+			if (label !== lastSessionLabel) {
+				await bridge.getTopicManager()!.renameTopic(currentSessionId, label);
+				lastSessionLabel = label;
+			}
+		}
 	}) as never);
 
 	pi.on("message_update", (async (event: { message: unknown; assistantMessageEvent: unknown }, _ctx: ExtensionContext) => {
