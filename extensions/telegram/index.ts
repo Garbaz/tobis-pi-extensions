@@ -215,8 +215,13 @@ async function connect(ctx: ExtensionCommandContext | ExtensionContext): Promise
 			updateStatus(ctx, err.message);
 		},
 		onStart: () => {
-			const topicInfo = topicsEnabled ? " (topics enabled)" : "";
-			ctx.ui.notify(`Telegram: connected as @${botUsername}${topicInfo}`, "info");
+			if (topicsEnabled) {
+				ctx.ui.notify(`Telegram: connected as @${botUsername} (topics enabled)`, "info");
+			} else if (config.topics === false) {
+				ctx.ui.notify(`Telegram: connected as @${botUsername} (topics disabled in config)`, "info");
+			} else {
+				ctx.ui.notify(`Telegram: connected as @${botUsername} (topics unavailable — enable via BotFather)`, "info");
+			}
 			updateStatus(ctx);
 		},
 		onStop: () => {
