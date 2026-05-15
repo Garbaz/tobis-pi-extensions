@@ -5,6 +5,7 @@
 
 import type { TelegramApi } from "./api.js";
 import type { ForumTopic } from "./types.js";
+import { warn } from "./log.js";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -110,7 +111,7 @@ export class TopicManager {
 		} catch (err) {
 			// Topic creation failed — fall back to no-topic mode for this session
 			const msg = err instanceof Error ? err.message : String(err);
-			console.warn(`[telegram] Failed to create forum topic "${topicName}": ${msg}`);
+			warn(`[telegram] Failed to create forum topic "${topicName}": ${msg}`);
 			return undefined;
 			}
 	}
@@ -134,7 +135,7 @@ export class TopicManager {
 			this.sessions.get(sessionId)!.isOpen = true;
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
-			console.warn(`[telegram] Failed to reopen forum topic "${name}" (thread ${threadId}): ${msg}`);
+			warn(`[telegram] Failed to reopen forum topic "${name}" (thread ${threadId}): ${msg}`);
 			// Even if reopen fails, the topic is still registered — messages may still work
 		}
 
@@ -154,7 +155,7 @@ export class TopicManager {
 			session.isOpen = false;
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
-			console.warn(`[telegram] Failed to close forum topic "${session.name}": ${msg}`);
+			warn(`[telegram] Failed to close forum topic "${session.name}": ${msg}`);
 		}
 	}
 
@@ -168,7 +169,7 @@ export class TopicManager {
 			session.isOpen = true;
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
-			console.warn(`[telegram] Failed to reopen forum topic "${session.name}": ${msg}`);
+			warn(`[telegram] Failed to reopen forum topic "${session.name}": ${msg}`);
 		}
 	}
 
@@ -181,7 +182,7 @@ export class TopicManager {
 			await this.api.deleteForumTopic(this.chatId, session.threadId, signal);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
-			console.warn(`[telegram] Failed to delete forum topic "${session.name}": ${msg}`);
+			warn(`[telegram] Failed to delete forum topic "${session.name}": ${msg}`);
 		}
 
 		this.threadToSession.delete(session.threadId);
@@ -204,7 +205,7 @@ export class TopicManager {
 			session.name = topicName;
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
-			console.warn(`[telegram] Failed to rename forum topic to "${topicName}": ${msg}`);
+			warn(`[telegram] Failed to rename forum topic to "${topicName}": ${msg}`);
 		}
 	}
 
@@ -243,13 +244,14 @@ export class TopicManager {
 		this.chatId = chatId;
 	}
 
-	/** Hide the General topic. Falls back gracefully if not supported in private chats. */
+	/** Hide the General topic. Only works in supergroup forums. No-op if topics are disabled. */
 	async hideGeneralTopic(signal?: AbortSignal): Promise<void> {
+		if (!this.topicsEnabled) return;
 		try {
 			await this.api.hideGeneralForumTopic(this.chatId, signal);
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			console.warn(`[telegram] Failed to hide General topic: ${msg}`);
+		} catch {
+			// Not supported in private chats (400: "the chat is not a supergroup forum")
+			// This is expected — silently ignore
 		}
 	}
 }

@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { open, type FileHandle } from "node:fs/promises";
 import type { Update, Message } from "./types.js";
+import { log, warn, error } from "./log.js";
 
 // ── Paths ────────────────────────────────────────────────────────────────────
 
@@ -47,7 +48,7 @@ async function migrateStateFile(): Promise<void> {
 	try {
 		const oldData = await readFile(OLD_STATE_PATH, "utf8");
 		await writeFile(STATE_PATH, oldData, "utf8");
-		console.log("[telegram] Migrated state file from", OLD_STATE_PATH, "to", STATE_PATH);
+		log(`[telegram] Migrated state file from ${OLD_STATE_PATH} to ${STATE_PATH}`);
 	} catch {
 		// Old file doesn't exist either — nothing to migrate
 	}
@@ -133,7 +134,7 @@ export async function tryAcquireRelayLock(): Promise<boolean> {
 				return false;
 			}
 			// Stale lock — overwrite it
-			console.warn(`[telegram-relay] Stale lock from PID ${existing.pid} — taking over`);
+			warn(`[telegram-relay] Stale lock from PID ${existing.pid} — taking over`);
 		}
 
 		// We have the lock — write our PID
@@ -259,7 +260,7 @@ export class RelayServer {
 			});
 
 			socket.on("error", (err) => {
-				console.warn(`[telegram-relay] Client socket error: ${err.message}`);
+				warn(`[telegram-relay] Client socket error: ${err.message}`);
 				this.clients.delete(socket);
 			});
 
@@ -272,7 +273,7 @@ export class RelayServer {
 			this.server!.on("error", reject);
 		});
 
-		console.log(`[telegram-relay] Listening on ${RELAY_SOCKET_PATH} (${this.clients.size} clients)`);
+		log(`[telegram-relay] Listening on ${RELAY_SOCKET_PATH} (${this.clients.size} clients)`);
 	}
 
 	/** Route an update to subscribed clients. */
@@ -415,7 +416,7 @@ export class RelayClient {
 				const socket = createConnection(RELAY_SOCKET_PATH, () => {
 					this.socket = socket;
 					this.connected = true;
-					console.log("[telegram-relay] Connected to relay server");
+					log("[telegram-relay] Connected to relay server");
 
 					// Re-subscribe all known threads
 					this.resubscribe();
@@ -450,7 +451,7 @@ export class RelayClient {
 						clearInterval(this.pingInterval);
 						this.pingInterval = undefined;
 					}
-					console.warn("[telegram-relay] Disconnected from relay server");
+					warn("[telegram-relay] Disconnected from relay server");
 					// Guard against double-fire
 					const cb = this.onDisconnect;
 					this.onDisconnect = undefined;
@@ -458,7 +459,7 @@ export class RelayClient {
 				});
 
 				socket.on("error", (err) => {
-					console.warn(`[telegram-relay] Socket error: ${err.message}`);
+					warn(`[telegram-relay] Socket error: ${err.message}`);
 					if (!this.connected) {
 						resolve(false);
 					}
@@ -522,7 +523,7 @@ export class RelayClient {
 				if (msg.data && this.onUpdate) {
 					// Fire and forget — errors handled by the bridge
 					Promise.resolve(this.onUpdate(msg.data)).catch((err) => {
-						console.error("[telegram-relay] Error handling routed update:", err);
+						error("[telegram-relay] Error handling routed update:", err);
 					});
 				}
 				break;
@@ -537,7 +538,7 @@ export class RelayClient {
 				break;
 			case "bye":
 				// Relay is shutting down — trigger failover
-				console.warn("[telegram-relay] Relay server is shutting down");
+				warn("[telegram-relay] Relay server is shutting down");
 				// Clear onDisconnect before disconnect to prevent double-fire from close event
 				const cb = this.onDisconnect;
 				this.onDisconnect = undefined;

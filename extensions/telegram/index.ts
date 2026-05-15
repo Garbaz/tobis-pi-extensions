@@ -13,6 +13,7 @@ import { registerTools } from "./tools.js";
 import { readSessionData, writeSessionData, deleteSessionData } from "./topics.js";
 import type { TelegramSessionData } from "./topics.js";
 import { RelayServer, RelayClient, tryAcquireRelayLock, releaseRelayLock } from "./relay.js";
+import { log, warn, error } from "./log.js";
 
 // ── Topic Name Generation ────────────────────────────────────────────────────
 // Derive a human-readable topic name from the session context.
@@ -305,7 +306,7 @@ async function startAsRelay(ctx: ExtensionCommandContext | ExtensionContext): Pr
 		});
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
-		console.error(`[telegram] Failed to start relay server: ${msg}`);
+		error(`[telegram] Failed to start relay server: ${msg}`);
 		// Fall back to single-process polling (no relay)
 		isRelay = false;
 		relayServer = undefined;
@@ -402,7 +403,7 @@ async function startAsClient(ctx: ExtensionCommandContext | ExtensionContext): P
 		updateStatus(ctx);
 	} else {
 		// Can't connect to relay — try to become the relay ourselves
-		console.warn("[telegram] Cannot connect to relay — attempting to take over");
+		warn("[telegram] Cannot connect to relay — attempting to take over");
 		await attemptFailover(ctx);
 	}
 }
@@ -412,7 +413,7 @@ async function attemptFailover(ctx: ExtensionCommandContext | ExtensionContext):
 	// Try to acquire the relay lock
 	const gotLock = await tryAcquireRelayLock();
 	if (gotLock) {
-		console.log("[telegram] Acquired relay lock — becoming the poller");
+		log("[telegram] Acquired relay lock — becoming the poller");
 		// Clean up client state
 		relayClient?.disconnect();
 		relayClient = undefined;
@@ -422,7 +423,7 @@ async function attemptFailover(ctx: ExtensionCommandContext | ExtensionContext):
 		// (The relay processes updates locally, so no subscription needed for itself)
 	} else {
 		// Another client won the race — try to reconnect as a client
-		console.log("[telegram] Another instance became relay — reconnecting as client");
+		log("[telegram] Another instance became relay — reconnecting as client");
 		relayClient?.disconnect();
 		relayClient = undefined;
 

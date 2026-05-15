@@ -3,6 +3,7 @@
 
 import type { TelegramApi } from "./api.js";
 import type { Update } from "./types.js";
+import { error } from "./log.js";
 
 /** Update types we subscribe to. Keep minimal — reduces traffic. */
 const ALLOWED_UPDATES = ["message", "edited_message", "callback_query", "my_chat_member"] as const;
@@ -89,7 +90,7 @@ export class TelegramPolling {
 					} catch (err) {
 						// Log but don't crash the loop — individual update handlers
 						// should not break polling
-						console.error(`[telegram] Error handling update ${update.update_id}:`, err);
+						error(`[telegram] Error handling update ${update.update_id}:`, err);
 					}
 				}
 			} catch (err) {
@@ -98,7 +99,7 @@ export class TelegramPolling {
 				if (err instanceof DOMException && err.name === "AbortError") break;
 
 				const message = err instanceof Error ? err.message : String(err);
-				console.error(`[telegram] Polling error: ${message}`);
+				error(`[telegram] Polling error: ${message}`);
 
 				// Unrecoverable errors
 				if (message.includes("401") || message.includes("Unauthorized")) {
