@@ -2,10 +2,16 @@
   "name": "pi-tobis-extensions",
   "version": "0.1.0",
   "description": "Tobi's custom pi extensions — selective install via package filtering.",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "license": "MIT",
   "type": "module",
-  "files": ["extensions", "src", "README.md"],
+  "files": [
+    "extensions",
+    "src",
+    "README.md"
+  ],
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
@@ -16,7 +22,12 @@
   "pi": {
     "extensions": [
       "./extensions/telegram/index.ts",
-    "./extensions/permissions/index.ts"
+      "./extensions/permissions/index.ts",
+      "./extensions/checkpoint/index.ts"
     ]
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "typescript": "^6.0.3"
   }
 }

@@ -1,0 +1,320 @@
+// ── Telegram Bot API Client ─────────────────────────────────────────────────
+// Thin typed wrapper over raw fetch — zero dependencies.
+
+import type {
+	TelegramApiResponse,
+	BotUser,
+	Update,
+	Message,
+	File,
+	InlineKeyboardMarkup,
+	ReactionType,
+	ReplyParameters,
+	LinkPreviewOptions,
+} from "./types.js";
+
+// ── Rate-limit backoff ───────────────────────────────────────────────────────
+
+const MAX_RETRIES = 3;
+
+async function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ── API Client ───────────────────────────────────────────────────────────────
+
+export class TelegramApi {
+	private readonly token: string;
+	private readonly baseUrl: string;
+
+	constructor(token: string, baseUrl = "https://api.telegram.org") {
+		this.token = token;
+		this.baseUrl = baseUrl;
+	}
+
+	// ── Core request methods ─────────────────────────────────────────────────
+
+	/** JSON POST to the Telegram API with automatic retry on 429. */
+	private async call<T>(method: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+		const url = `${this.baseUrl}/bot${this.token}/${method}`;
+		for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+			const response = await fetch(url, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+				signal,
+			});
+			const data = (await response.json()) as TelegramApiResponse<T>;
+
+			if (data.ok && data.result !== undefined) {
+				return data.result;
+			}
+
+			// Retry on 429 with backoff
+			if (data.error_code === 429 && data.parameters?.retry_after && attempt < MAX_RETRIES) {
+				await sleep(data.parameters.retry_after * 1000);
+				continue;
+			}
+
+			// Migrate to supergroup
+			if (data.parameters?.migrate_to_chat_id !== undefined) {
+				throw new TelegramApiError(
+					method,
+					data.error_code ?? -1,
+					`Chat migrated to supergroup ${data.parameters.migrate_to_chat_id}`,
+					data.description,
+				);
+			}
+
+			throw new TelegramApiError(method, data.error_code ?? -1, data.description ?? "Unknown error", data.description);
+		}
+		throw new TelegramApiError(method, 429, "Too Many Requests (exhausted retries)", "retry_after exhausted");
+	}
+
+	/** Multipart/form-data POST for file uploads. */
+	private async callMultipart<T>(
+		method: string,
+		fields: Record<string, string | number | boolean>,
+		fileField: string,
+		fileData: Blob,
+		fileName: string,
+		signal?: AbortSignal,
+	): Promise<T> {
+		const url = `${this.baseUrl}/bot${this.token}/${method}`;
+		const form = new FormData();
+		for (const [key, value] of Object.entries(fields)) {
+			form.set(key, String(value));
+		}
+		form.set(fileField, fileData, fileName);
+
+		for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+			const response = await fetch(url, { method: "POST", body: form, signal });
+			const data = (await response.json()) as TelegramApiResponse<T>;
+
+			if (data.ok && data.result !== undefined) {
+				return data.result;
+			}
+
+			if (data.error_code === 429 && data.parameters?.retry_after && attempt < MAX_RETRIES) {
+				await sleep(data.parameters.retry_after * 1000);
+				continue;
+			}
+
+			throw new TelegramApiError(method, data.error_code ?? -1, data.description ?? "Upload failed", data.description);
+		}
+		throw new TelegramApiError(method, 429, "Too Many Requests (exhausted retries)", "retry_after exhausted");
+	}
+
+	/** Download a file from Telegram's file server. */
+	async downloadFile(filePath: string, signal?: AbortSignal): Promise<Response> {
+		const url = `${this.baseUrl}/file/bot${this.token}/${filePath}`;
+		const response = await fetch(url, { signal });
+		if (!response.ok) {
+			throw new TelegramApiError("downloadFile", response.status, `HTTP ${response.status}`, undefined);
+		}
+		return response;
+	}
+
+	// ── Bot info ─────────────────────────────────────────────────────────────
+
+	getMe(signal?: AbortSignal): Promise<BotUser> {
+		return this.call("getMe", {}, signal);
+	}
+
+	// ── Updates ──────────────────────────────────────────────────────────────
+
+	getUpdates(params: { offset?: number; limit?: number; timeout?: number; allowed_updates?: string[] }, signal?: AbortSignal): Promise<Update[]> {
+		return this.call("getUpdates", params as Record<string, unknown>, signal);
+	}
+
+	// ── Sending messages ─────────────────────────────────────────────────────
+
+	sendMessage(params: {
+		chat_id: number | string;
+		text: string;
+		parse_mode?: "MarkdownV2" | "HTML" | "Markdown";
+		entities?: unknown[];
+		reply_parameters?: ReplyParameters;
+		reply_markup?: InlineKeyboardMarkup;
+		disable_notification?: boolean;
+		link_preview_options?: LinkPreviewOptions;
+		message_thread_id?: number;
+	}, signal?: AbortSignal): Promise<Message> {
+		return this.call("sendMessage", params as Record<string, unknown>, signal);
+	}
+
+	editMessageText(params: {
+		chat_id?: number | string;
+		message_id?: number;
+		inline_message_id?: string;
+		text: string;
+		parse_mode?: "MarkdownV2" | "HTML" | "Markdown";
+		entities?: unknown[];
+		link_preview_options?: LinkPreviewOptions;
+		reply_markup?: InlineKeyboardMarkup;
+	}, signal?: AbortSignal): Promise<Message | true> {
+		return this.call("editMessageText", params as Record<string, unknown>, signal);
+	}
+
+	editMessageReplyMarkup(params: {
+		chat_id?: number | string;
+		message_id?: number;
+		inline_message_id?: string;
+		reply_markup?: InlineKeyboardMarkup;
+	}, signal?: AbortSignal): Promise<Message | true> {
+		return this.call("editMessageReplyMarkup", params as Record<string, unknown>, signal);
+	}
+
+	deleteMessage(chat_id: number | string, message_id: number, signal?: AbortSignal): Promise<true> {
+		return this.call("deleteMessage", { chat_id, message_id }, signal);
+	}
+
+	// ── Chat actions ─────────────────────────────────────────────────────────
+
+	sendChatAction(chat_id: number | string, action: ChatAction, signal?: AbortSignal): Promise<true> {
+		return this.call("sendChatAction", { chat_id, action }, signal);
+	}
+
+	// ── Reactions ────────────────────────────────────────────────────────────
+
+	setMessageReaction(params: {
+		chat_id: number | string;
+		message_id: number;
+		reaction?: ReactionType[];
+		is_big?: boolean;
+	}, signal?: AbortSignal): Promise<true> {
+		return this.call("setMessageReaction", params as Record<string, unknown>, signal);
+	}
+
+	// ── Callback queries ─────────────────────────────────────────────────────
+
+	answerCallbackQuery(params: {
+		callback_query_id: string;
+		text?: string;
+		show_alert?: boolean;
+		url?: string;
+		cache_time?: number;
+	}, signal?: AbortSignal): Promise<true> {
+		return this.call("answerCallbackQuery", params as Record<string, unknown>, signal);
+	}
+
+	// ── File operations ──────────────────────────────────────────────────────
+
+	getFile(file_id: string, signal?: AbortSignal): Promise<File> {
+		return this.call("getFile", { file_id }, signal);
+	}
+
+	/** Upload a document file from buffer. */
+	async sendDocument(params: {
+		chat_id: number | string;
+		document: { data: Blob; filename: string };
+		caption?: string;
+		parse_mode?: "MarkdownV2" | "HTML" | "Markdown";
+		reply_parameters?: ReplyParameters;
+		disable_notification?: boolean;
+	}, signal?: AbortSignal): Promise<Message> {
+		const fields: Record<string, string | number | boolean> = {
+			chat_id: String(params.chat_id),
+		};
+		if (params.caption) fields.caption = params.caption;
+		if (params.parse_mode) fields.parse_mode = params.parse_mode;
+		if (params.disable_notification) fields.disable_notification = "true";
+		if (params.reply_parameters) fields.reply_parameters = JSON.stringify(params.reply_parameters);
+
+		return this.callMultipart("sendDocument", fields, "document", params.document.data, params.document.filename, signal);
+	}
+
+	/** Upload a photo from buffer. */
+	async sendPhoto(params: {
+		chat_id: number | string;
+		photo: { data: Blob; filename: string };
+		caption?: string;
+		parse_mode?: "MarkdownV2" | "HTML" | "Markdown";
+		reply_parameters?: ReplyParameters;
+		disable_notification?: boolean;
+	}, signal?: AbortSignal): Promise<Message> {
+		const fields: Record<string, string | number | boolean> = {
+			chat_id: String(params.chat_id),
+		};
+		if (params.caption) fields.caption = params.caption;
+		if (params.parse_mode) fields.parse_mode = params.parse_mode;
+		if (params.disable_notification) fields.disable_notification = "true";
+		if (params.reply_parameters) fields.reply_parameters = JSON.stringify(params.reply_parameters);
+
+		return this.callMultipart("sendPhoto", fields, "photo", params.photo.data, params.photo.filename, signal);
+	}
+
+	/** Upload a voice note from buffer (OGG/OPUS, MP3, or M4A). */
+	async sendVoice(params: {
+		chat_id: number | string;
+		voice: { data: Blob; filename: string };
+		caption?: string;
+		parse_mode?: "MarkdownV2" | "HTML" | "Markdown";
+		duration?: number;
+		reply_parameters?: ReplyParameters;
+		disable_notification?: boolean;
+	}, signal?: AbortSignal): Promise<Message> {
+		const fields: Record<string, string | number | boolean> = {
+			chat_id: String(params.chat_id),
+		};
+		if (params.caption) fields.caption = params.caption;
+		if (params.parse_mode) fields.parse_mode = params.parse_mode;
+		if (params.duration) fields.duration = params.duration;
+		if (params.disable_notification) fields.disable_notification = "true";
+		if (params.reply_parameters) fields.reply_parameters = JSON.stringify(params.reply_parameters);
+
+		return this.callMultipart("sendVoice", fields, "voice", params.voice.data, params.voice.filename, signal);
+	}
+
+	// ── Chat info ────────────────────────────────────────────────────────────
+
+	getChat(chat_id: number | string, signal?: AbortSignal): Promise<unknown> {
+		return this.call("getChat", { chat_id }, signal);
+	}
+
+	setMyCommands(params: {
+		commands: { command: string; description: string }[];
+		scope?: Record<string, unknown>;
+		language_code?: string;
+	}, signal?: AbortSignal): Promise<true> {
+		return this.call("setMyCommands", params as Record<string, unknown>, signal);
+	}
+
+	// ── Guest mode (Bot API 10.0) ────────────────────────────────────────────
+
+	answerGuestQuery(params: {
+		guest_query_id: string;
+		result: unknown;
+	}, signal?: AbortSignal): Promise<unknown> {
+		return this.call("answerGuestQuery", params as Record<string, unknown>, signal);
+	}
+}
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+export type ChatAction =
+	| "typing"
+	| "upload_photo"
+	| "record_video"
+	| "upload_video"
+	| "record_voice"
+	| "upload_voice"
+	| "upload_document"
+	| "choose_sticker"
+	| "find_location"
+	| "record_video_note"
+	| "upload_video_note";
+
+// ── Error ────────────────────────────────────────────────────────────────────
+
+export class TelegramApiError extends Error {
+	constructor(
+		public readonly method: string,
+		public readonly code: number,
+		public readonly description: string,
+		public readonly rawDescription?: string,
+	) {
+		super(`Telegram API ${method} failed (${code}): ${description}`);
+		this.name = "TelegramApiError";
+	}
+}
