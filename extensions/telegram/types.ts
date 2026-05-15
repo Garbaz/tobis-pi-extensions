@@ -327,6 +327,25 @@ export interface BotUser extends User {
 	supports_inline_queries?: boolean;
 	supports_guest_queries?: boolean;
 	can_connect_to_business?: boolean;
+	/** True if the bot has forum topic mode enabled in private chats. Bot API 9.4+. */
+	has_topics_enabled?: boolean;
+	/** True if the bot allows users to create and delete topics in private chats. Bot API 9.4+. */
+	allows_users_to_create_topics?: boolean;
+}
+
+// ── Forum Topic ──────────────────────────────────────────────────────────────
+
+export interface ForumTopic {
+	/** Unique identifier of the forum topic. */
+	message_thread_id: number;
+	/** Name of the topic. */
+	name: string;
+	/** Color of the topic icon in RGB format. */
+	icon_color?: number;
+	/** Unique identifier of the custom emoji shown as the topic icon. */
+	icon_custom_emoji_id?: string;
+	/** True if the name wasn't specified explicitly and likely needs changing. */
+	is_name_implicit?: true;
 }
 
 // ── sendMessage result ───────────────────────────────────────────────────────
@@ -368,6 +387,10 @@ export type MediaType = "voice" | "audio" | "photo" | "sticker" | "video" | "vid
 export interface TelegramConfig {
 	botToken?: string;
 	allowedUserId?: number;
+	/** Whether to use forum topics for per-session routing.
+	 *  When true (default), creates a topic per Pi session if the bot supports it.
+	 *  Set to false to disable topics even if the bot supports them. */
+	topics?: boolean;
 	/** Media processors keyed by Telegram message type.
 	 *  null = explicitly disabled; absent = not configured (same effect: placeholder message). */
 	media?: Partial<Record<MediaType, MediaProcessor | null>>;

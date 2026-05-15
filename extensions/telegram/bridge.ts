@@ -1,12 +1,14 @@
 // ── Telegram ↔ Pi Message Bridge ─────────────────────────────────────────────
 // Orchestrates incoming (Telegram → Pi) and outgoing (Pi → Telegram) message
 // flow. Delegates to incoming.ts and outgoing.ts for the heavy lifting.
+// Supports forum topics for multi-session routing (Bot API 9.4+).
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TelegramApi } from "./api.js";
 import type { Message, Update, TelegramConfig, MediaType } from "./types.js";
 import { handleUpdate, type IncomingResult } from "./incoming.js";
 import { OutgoingHandler } from "./outgoing.js";
+import { TopicManager } from "./topics.js";
 import { detectContentTypes } from "./formatting.js";
 import { senderName } from "./formatting.js";
 
@@ -41,10 +43,18 @@ export class TelegramBridge {
 	private config: TelegramConfig;
 	private pi: ExtensionAPI;
 	private callbacks: BridgeCallbacks;
-	private outgoing: OutgoingHandler;
+
+	/** Per-session outgoing handlers. Keyed by Pi session ID. */
+	private outgoingBySession = new Map<string, OutgoingHandler>();
+
+	/** The currently active session's outgoing handler (for legacy single-session flow). */
+	private activeOutgoing: OutgoingHandler;
 
 	/** The chat ID currently locked to the Pi session. */
 	private activeChatId: number | undefined;
+
+	/** Forum topic manager — one per chat. */
+	private topicManager: TopicManager | undefined;
 
 	/** Context about the Telegram message that triggered the current turn.
 	 *  Set by handleUpdate, consumed by before_agent_start to inject system prompt,
@@ -56,7 +66,7 @@ export class TelegramBridge {
 		this.config = config;
 		this.pi = pi;
 		this.callbacks = callbacks;
-		this.outgoing = new OutgoingHandler(api);
+		this.activeOutgoing = new OutgoingHandler(api);
 	}
 
 	/** Get and clear the last Telegram turn context — used by before_agent_start to inject prompt, then cleared. */
@@ -71,10 +81,18 @@ export class TelegramBridge {
 		return this.activeChatId;
 	}
 
+	/** Get the topic manager (for session lifecycle hooks). */
+	getTopicManager(): TopicManager | undefined {
+		return this.topicManager;
+	}
+
 	/** Lock the bridge to a specific chat. */
 	lockToChat(chatId: number): void {
 		this.activeChatId = chatId;
-		this.outgoing.setActiveChatId(chatId);
+		this.activeOutgoing.setActiveChatId(chatId);
+		if (this.topicManager) {
+			this.topicManager.setChatId(chatId);
+		}
 		this.callbacks.onChatLock();
 	}
 
@@ -82,9 +100,68 @@ export class TelegramBridge {
 	unlock(): void {
 		if (this.activeChatId !== undefined) {
 			this.activeChatId = undefined;
-			this.outgoing.setActiveChatId(undefined);
+			this.activeOutgoing.setActiveChatId(undefined);
 			this.callbacks.onChatUnlock();
 		}
+	}
+
+	/** Enable or disable forum topic support (called after getMe() check).
+	 *  If chatId is provided and no activeChatId is set, uses the provided chatId.
+	 *  This is needed because topics can be created before the first message arrives
+	 *  (e.g., at session_start when we already know the paired user's chat ID). */
+	setTopicsEnabled(enabled: boolean, chatId?: number): void {
+		if (enabled) {
+			const effectiveChatId = this.activeChatId ?? chatId;
+			if (effectiveChatId && !this.topicManager) {
+				this.topicManager = new TopicManager(this.api, effectiveChatId);
+				this.topicManager.setTopicsEnabled(true);
+			} else if (this.topicManager) {
+				this.topicManager.setTopicsEnabled(true);
+			}
+		} else {
+			this.topicManager = undefined;
+		}
+	}
+
+	/** Register a session with a forum topic. Creates the topic if topics are enabled.
+	 *  Returns the thread ID, or undefined if topics are disabled. */
+	async registerSession(sessionId: string, sessionName: string, signal?: AbortSignal): Promise<number | undefined> {
+		if (!this.topicManager) return undefined;
+
+		const threadId = await this.topicManager.createTopic(sessionId, sessionName, signal);
+		if (threadId !== undefined) {
+			// Create an outgoing handler for this session
+			const outgoing = new OutgoingHandler(this.api);
+			outgoing.setActiveChatId(this.activeChatId!);
+			outgoing.setThreadId(threadId);
+			this.outgoingBySession.set(sessionId, outgoing);
+		}
+		return threadId;
+	}
+
+	/** Unregister a session — close and remove its forum topic. */
+	async unregisterSession(sessionId: string, signal?: AbortSignal): Promise<void> {
+		if (this.topicManager) {
+			await this.topicManager.closeTopic(sessionId, signal);
+			this.topicManager.removeSession(sessionId);
+		}
+		this.outgoingBySession.delete(sessionId);
+	}
+
+	/** Activate a session's outgoing handler (switch topic context for current turn). */
+	activateSession(sessionId: string): void {
+		const outgoing = this.outgoingBySession.get(sessionId);
+		if (outgoing) {
+			this.activeOutgoing = outgoing;
+		}
+	}
+
+	/** Get the outgoing handler for a specific session, or the active one as fallback. */
+	getOutgoing(sessionId?: string): OutgoingHandler {
+		if (sessionId) {
+			return this.outgoingBySession.get(sessionId) ?? this.activeOutgoing;
+		}
+		return this.activeOutgoing;
 	}
 
 	// ── Incoming: Telegram → Pi ──────────────────────────────────────────────
@@ -104,14 +181,22 @@ export class TelegramBridge {
 		);
 
 		if (result) {
+			// Route to the correct outgoing handler based on thread ID
+			const msg = (update.message || update.edited_message) as Message | undefined;
+			if (msg && this.topicManager) {
+				const sessionId = this.topicManager.getSessionByThread(msg.message_thread_id);
+				if (sessionId) {
+					this.activateSession(sessionId);
+				}
+			}
+
 			// Set ⏳ reaction on the user's message
-			await this.outgoing.setReaction(result.chatId, result.messageId, "⏳");
+			await this.activeOutgoing.setReaction(result.chatId, result.messageId, "⏳");
 
 			// Remember for completion reaction
-			this.outgoing.setLastUserMessage(result.chatId, result.messageId);
+			this.activeOutgoing.setLastUserMessage(result.chatId, result.messageId);
 
 			// Extract the message for turn context detection
-			const msg = (update.message || update.edited_message) as Message | undefined;
 			if (msg) {
 				this._lastTelegramContext = {
 					username: senderName(msg),
@@ -126,26 +211,26 @@ export class TelegramBridge {
 
 	/** Called on agent_end: send final response, update reaction. */
 	async onAgentEnd(event: { messages: unknown[] }, ctx: ExtensionContext): Promise<void> {
-		await this.outgoing.onAgentEnd(event, ctx);
+		await this.activeOutgoing.onAgentEnd(event, ctx);
 	}
 
 	/** Called on message_update: streaming preview via editMessageText. */
 	async onMessageUpdate(event: { message: unknown; assistantMessageEvent: unknown }, ctx: ExtensionContext): Promise<void> {
-		await this.outgoing.onMessageUpdate(event, ctx);
+		await this.activeOutgoing.onMessageUpdate(event, ctx);
 	}
 
 	/** Flush any pending streaming edit. */
 	async flushPendingEdit(): Promise<void> {
-		await this.outgoing.flushPendingEdit();
+		await this.activeOutgoing.flushPendingEdit();
 	}
 
 	/** Start sending typing indicators. */
 	startTypingIndicator(ctx: ExtensionContext): void {
-		this.outgoing.startTypingIndicator(ctx);
+		this.activeOutgoing.startTypingIndicator(ctx);
 	}
 
 	/** Stop the typing indicator. */
 	stopTypingIndicator(): void {
-		this.outgoing.stopTypingIndicator();
+		this.activeOutgoing.stopTypingIndicator();
 	}
 }

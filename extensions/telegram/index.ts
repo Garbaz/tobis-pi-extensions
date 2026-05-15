@@ -1,5 +1,6 @@
 // ── Telegram Extension Entry Point ───────────────────────────────────────────
 // Bridges Pi ↔ Telegram: messages, reactions, typing, streaming preview.
+// Supports forum topics for per-session routing (Bot API 9.4+).
 
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { TelegramApi } from "./api.js";
@@ -9,6 +10,20 @@ import type { TelegramTurnContext } from "./bridge.js";
 import { readConfig, saveConfigField, updateConfig, readLastUpdateId, saveLastUpdateId } from "./config.js";
 import type { TelegramConfig, MediaType } from "./types.js";
 import { registerTools } from "./tools.js";
+
+// ── Topic Name Generation ────────────────────────────────────────────────────
+// Derive a human-readable topic name from the session context.
+
+function getSessionLabel(ctx: ExtensionContext): string {
+	// Try session name first (user-set display name)
+	const name = ctx.sessionManager.getSessionName();
+	if (name) return name;
+
+	// Fall back to CWD basename
+	const cwd = ctx.sessionManager.getCwd();
+	const parts = cwd.split("/");
+	return parts[parts.length - 1] || "pi-session";
+}
 
 // ── System Prompt Injection ──────────────────────────────────────────────────
 // Injected only on turns that originated from Telegram, via before_agent_start.
@@ -85,6 +100,10 @@ let bridge: TelegramBridge;
 
 /** Runtime state — not persisted to config. Set by getMe() on connect. */
 let botUsername: string | undefined;
+/** Whether the bot supports forum topics in private chats (from getMe). */
+let topicsEnabled: boolean = false;
+/** The current session's ID (set on session_start, cleared on session_shutdown). */
+let currentSessionId: string | undefined;
 
 // ── Status Bar ───────────────────────────────────────────────────────────────
 // Strategy: only show status for states that need attention.
@@ -147,6 +166,7 @@ async function connect(ctx: ExtensionCommandContext | ExtensionContext): Promise
 	try {
 		const botInfo = await api.getMe();
 		botUsername = botInfo.username;
+		topicsEnabled = botInfo.has_topics_enabled === true && config.topics !== false;
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		ctx.ui.notify(`Telegram: invalid token — ${msg}`, "error");
@@ -158,16 +178,29 @@ async function connect(ctx: ExtensionCommandContext | ExtensionContext): Promise
 		onPair: async (userId: number, userName: string) => {
 			// Config is already mutated by the bridge (same object reference)
 			await saveConfigField("allowedUserId", config.allowedUserId);
+			// Now that we know the chat ID, enable topics if supported
+			if (topicsEnabled && config.allowedUserId) {
+				bridge!.setTopicsEnabled(true, config.allowedUserId);
+			}
 			statusCtx?.ui.notify(`Telegram: paired with ${userName} (${userId})`, "info");
 			onBridgeStateChange();
 		},
 		onChatLock: () => {
+			// Chat locked — enable topics if not already done (e.g. on reconnect)
+			if (topicsEnabled) {
+				bridge!.setTopicsEnabled(true, config.allowedUserId);
+			}
 			onBridgeStateChange();
 		},
 		onChatUnlock: () => {
 			onBridgeStateChange();
 		},
 	});
+
+	// Pre-create the topic manager if we already know the chat ID (from a paired user)
+	if (topicsEnabled && config.allowedUserId) {
+		bridge.setTopicsEnabled(true, config.allowedUserId);
+	}
 
 	polling = new TelegramPolling(api, {
 		onUpdate: async (update) => {
@@ -182,7 +215,8 @@ async function connect(ctx: ExtensionCommandContext | ExtensionContext): Promise
 			updateStatus(ctx, err.message);
 		},
 		onStart: () => {
-			ctx.ui.notify(`Telegram: connected as @${botUsername}`, "info");
+			const topicInfo = topicsEnabled ? " (topics enabled)" : "";
+			ctx.ui.notify(`Telegram: connected as @${botUsername}${topicInfo}`, "info");
 			updateStatus(ctx);
 		},
 		onStop: () => {
@@ -206,6 +240,7 @@ async function disconnect(ctx: ExtensionCommandContext | ExtensionContext): Prom
 	bridge?.stopTypingIndicator();
 	bridge?.unlock();
 	botUsername = undefined;
+	topicsEnabled = false;
 	statusCtx = ctx;
 	ctx.ui.notify("Telegram: disconnected", "info");
 	updateStatus(ctx);
@@ -230,6 +265,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 				{ value: "disconnect", label: "Stop the Telegram bridge" },
 				{ value: "setup", label: "Configure the bot token" },
 				{ value: "status", label: "Show connection status" },
+				{ value: "topics", label: "Toggle forum topics on/off" },
 			];
 			const matched = subcommands.filter((s) => s.value.startsWith(prefix));
 			return matched.length > 0 ? matched : null;
@@ -271,11 +307,35 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 					lines.push(`user: ${config.allowedUserId ?? "not paired"}`);
 					lines.push(`polling: ${polling?.isRunning() ? "running" : "stopped"}`);
 					lines.push(`chat: ${bridge?.getActiveChatId() ?? "none"}`);
+					lines.push(`topics: ${topicsEnabled ? "enabled" : "disabled"}`);
+					if (bridge?.getTopicManager()) {
+						lines.push(`sessions: ${bridge.getTopicManager()!.size}`);
+					}
 					ctx.ui.notify(lines.join(" | "), "info");
 					break;
 				}
 
-				default:
+				case "topics": {
+				const current = config.topics !== false;
+				const arg = rest[0]?.trim().toLowerCase();
+				if (arg === "on" || arg === "true" || arg === "1") {
+					config.topics = true;
+					await saveConfigField("topics", true);
+				} else if (arg === "off" || arg === "false" || arg === "0") {
+					config.topics = false;
+					await saveConfigField("topics", false);
+				} else {
+					// Toggle
+					config.topics = !current;
+					await saveConfigField("topics", config.topics);
+				}
+				topicsEnabled = config.topics !== false;
+				if (bridge) bridge.setTopicsEnabled(topicsEnabled);
+				ctx.ui.notify(`Telegram: topics ${config.topics !== false ? "enabled" : "disabled"}. Reconnect to apply.`, "info");
+				break;
+			}
+
+			default:
 					ctx.ui.notify("Usage: /telegram <connect|disconnect|setup|status>", "info");
 					break;
 			}
@@ -284,8 +344,11 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 
 	// ── Events ───────────────────────────────────────────────────────────────
 
+	// On session start: auto-connect and create a forum topic for this session
 	pi.on("session_start", async (_event: unknown, ctx: ExtensionContext) => {
 		config = await readConfig();
+		currentSessionId = ctx.sessionManager.getSessionId();
+
 		// Auto-connect if token is configured and no other session holds the lock
 		if (config.botToken && config.allowedUserId) {
 			await connect(ctx);
@@ -295,9 +358,26 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		} else {
 			updateStatus(ctx);
 		}
+
+		// Create a forum topic for this session (if topics are enabled and we're connected)
+		if (currentSessionId && bridge && bridge.getTopicManager() && config.allowedUserId) {
+			const label = getSessionLabel(ctx);
+			const threadId = await bridge.registerSession(currentSessionId, label);
+			if (threadId !== undefined) {
+				ctx.ui.notify(`Telegram: created topic "${label}"`, "info");
+			}
+		}
 	});
 
-	pi.on("session_shutdown", async (_event: unknown, _ctx: ExtensionContext) => {
+	// On session shutdown: close the topic and clean up
+	pi.on("session_shutdown", async (_event: unknown, ctx: ExtensionContext) => {
+		const sessionId = ctx.sessionManager.getSessionId();
+
+		// Close and remove the session's forum topic
+		if (sessionId && bridge) {
+			await bridge.unregisterSession(sessionId);
+		}
+
 		// Clean disconnect: stop polling, free the Telegram API lock
 		if (polling?.isRunning()) {
 			await polling.stop();
@@ -305,6 +385,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		bridge?.stopTypingIndicator();
 		bridge?.unlock();
 		botUsername = undefined;
+		currentSessionId = undefined;
 		// Persist polling cursor so we resume cleanly
 		if (lastUpdateId !== undefined) {
 			await saveLastUpdateId(lastUpdateId);
@@ -312,11 +393,23 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 	});
 
 	pi.on("agent_start", ((_event: unknown, ctx: ExtensionContext) => {
+		// Activate the correct session's outgoing handler for this turn
+		const sessionId = ctx.sessionManager.getSessionId();
+		if (sessionId && bridge) {
+			bridge.activateSession(sessionId);
+		}
 		bridge?.startTypingIndicator(ctx);
 	}) as never);
 
 	// Inject telegram context into system prompt — only on Telegram-originated turns
-	pi.on("before_agent_start", ((event: { prompt: string; systemPrompt: string }, _ctx: ExtensionContext) => {
+	// Also activate the correct session's outgoing handler
+	pi.on("before_agent_start", ((event: { prompt: string; systemPrompt: string }, ctx: ExtensionContext) => {
+		// Activate the correct session's outgoing handler for this turn
+		const sessionId = ctx.sessionManager.getSessionId();
+		if (sessionId && bridge) {
+			bridge.activateSession(sessionId);
+		}
+
 		const telegramCtx = bridge?.consumeTelegramContext();
 		if (!telegramCtx) return; // this turn didn't come from telegram
 

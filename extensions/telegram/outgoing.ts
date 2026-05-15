@@ -11,6 +11,8 @@ import { escapeMarkdownV2, splitMessage, MAX_MESSAGE_LENGTH } from "./markdown.j
 export class OutgoingHandler {
 	private api: TelegramApi;
 	private activeChatId: number | undefined;
+	/** The forum topic thread ID to send messages into (undefined = General/no topic). */
+	private threadId: number | undefined;
 
 	/** Message ID of the currently streaming preview message (for editMessageText). */
 	private previewMessageId: number | undefined;
@@ -39,6 +41,13 @@ export class OutgoingHandler {
 		this.lastUserMessageId = undefined;
 		this.lastUserChatId = undefined;
 		this.stopTypingIndicator();
+	}
+
+	/** Set the forum topic thread ID for outgoing messages. */
+	setThreadId(threadId: number | undefined): void {
+		this.threadId = threadId;
+		// Reset preview when thread changes (can't edit across topics)
+		this.previewMessageId = undefined;
 	}
 
 	/** Remember the user message for completion reaction. */
@@ -86,6 +95,7 @@ export class OutgoingHandler {
 					chat_id: chatId,
 					text: chunks[i],
 					parse_mode: "MarkdownV2",
+					message_thread_id: this.threadId,
 				});
 			}
 			await this.setCompletionReaction("✅");
@@ -97,6 +107,7 @@ export class OutgoingHandler {
 						await this.api.sendMessage({
 							chat_id: chatId,
 							text: chunks[i],
+							message_thread_id: this.threadId,
 						});
 					}
 					await this.setCompletionReaction("✅");
@@ -167,7 +178,7 @@ export class OutgoingHandler {
 		const chatId = this.activeChatId;
 		const sendTyping = async (): Promise<void> => {
 			try {
-				await this.api.sendChatAction(chatId, "typing");
+				await this.api.sendChatAction(chatId, "typing", this.threadId);
 			} catch {
 				// Non-critical
 			}
@@ -205,6 +216,7 @@ export class OutgoingHandler {
 				const result = await this.api.sendMessage({
 					chat_id: this.activeChatId,
 					text: previewText,
+					message_thread_id: this.threadId,
 				});
 				this.previewMessageId = result.message_id;
 			}

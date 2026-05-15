@@ -4,6 +4,7 @@
 import type {
 	TelegramApiResponse,
 	BotUser,
+	ForumTopic,
 	Update,
 	Message,
 	File,
@@ -171,8 +172,8 @@ export class TelegramApi {
 
 	// ── Chat actions ─────────────────────────────────────────────────────────
 
-	sendChatAction(chat_id: number | string, action: ChatAction, signal?: AbortSignal): Promise<true> {
-		return this.call("sendChatAction", { chat_id, action }, signal);
+	sendChatAction(chat_id: number | string, action: ChatAction, message_thread_id?: number, signal?: AbortSignal): Promise<true> {
+		return this.call("sendChatAction", { chat_id, action, message_thread_id }, signal);
 	}
 
 	// ── Reactions ────────────────────────────────────────────────────────────
@@ -212,6 +213,7 @@ export class TelegramApi {
 		parse_mode?: "MarkdownV2" | "HTML" | "Markdown";
 		reply_parameters?: ReplyParameters;
 		disable_notification?: boolean;
+		message_thread_id?: number;
 	}, signal?: AbortSignal): Promise<Message> {
 		const fields: Record<string, string | number | boolean> = {
 			chat_id: String(params.chat_id),
@@ -220,6 +222,7 @@ export class TelegramApi {
 		if (params.parse_mode) fields.parse_mode = params.parse_mode;
 		if (params.disable_notification) fields.disable_notification = "true";
 		if (params.reply_parameters) fields.reply_parameters = JSON.stringify(params.reply_parameters);
+		if (params.message_thread_id) fields.message_thread_id = String(params.message_thread_id);
 
 		return this.callMultipart("sendDocument", fields, "document", params.document.data, params.document.filename, signal);
 	}
@@ -232,6 +235,7 @@ export class TelegramApi {
 		parse_mode?: "MarkdownV2" | "HTML" | "Markdown";
 		reply_parameters?: ReplyParameters;
 		disable_notification?: boolean;
+		message_thread_id?: number;
 	}, signal?: AbortSignal): Promise<Message> {
 		const fields: Record<string, string | number | boolean> = {
 			chat_id: String(params.chat_id),
@@ -240,6 +244,7 @@ export class TelegramApi {
 		if (params.parse_mode) fields.parse_mode = params.parse_mode;
 		if (params.disable_notification) fields.disable_notification = "true";
 		if (params.reply_parameters) fields.reply_parameters = JSON.stringify(params.reply_parameters);
+		if (params.message_thread_id) fields.message_thread_id = String(params.message_thread_id);
 
 		return this.callMultipart("sendPhoto", fields, "photo", params.photo.data, params.photo.filename, signal);
 	}
@@ -253,6 +258,7 @@ export class TelegramApi {
 		duration?: number;
 		reply_parameters?: ReplyParameters;
 		disable_notification?: boolean;
+		message_thread_id?: number;
 	}, signal?: AbortSignal): Promise<Message> {
 		const fields: Record<string, string | number | boolean> = {
 			chat_id: String(params.chat_id),
@@ -262,8 +268,46 @@ export class TelegramApi {
 		if (params.duration) fields.duration = params.duration;
 		if (params.disable_notification) fields.disable_notification = "true";
 		if (params.reply_parameters) fields.reply_parameters = JSON.stringify(params.reply_parameters);
+		if (params.message_thread_id) fields.message_thread_id = String(params.message_thread_id);
 
 		return this.callMultipart("sendVoice", fields, "voice", params.voice.data, params.voice.filename, signal);
+	}
+
+	// ── Forum Topics ─────────────────────────────────────────────────────────
+
+	/** Create a forum topic in a private chat or supergroup. Bot API 9.4+. */
+	createForumTopic(params: {
+		chat_id: number | string;
+		name: string;
+		icon_color?: number;
+		icon_custom_emoji_id?: string;
+	}, signal?: AbortSignal): Promise<ForumTopic> {
+		return this.call("createForumTopic", params as Record<string, unknown>, signal);
+	}
+
+	/** Edit name and icon of a forum topic. */
+	editForumTopic(params: {
+		chat_id: number | string;
+		message_thread_id: number;
+		name?: string;
+		icon_custom_emoji_id?: string;
+	}, signal?: AbortSignal): Promise<true> {
+		return this.call("editForumTopic", params as Record<string, unknown>, signal);
+	}
+
+	/** Close an open forum topic. */
+	closeForumTopic(chat_id: number | string, message_thread_id: number, signal?: AbortSignal): Promise<true> {
+		return this.call("closeForumTopic", { chat_id, message_thread_id }, signal);
+	}
+
+	/** Reopen a closed forum topic. */
+	reopenForumTopic(chat_id: number | string, message_thread_id: number, signal?: AbortSignal): Promise<true> {
+		return this.call("reopenForumTopic", { chat_id, message_thread_id }, signal);
+	}
+
+	/** Delete a forum topic and all its messages. */
+	deleteForumTopic(chat_id: number | string, message_thread_id: number, signal?: AbortSignal): Promise<true> {
+		return this.call("deleteForumTopic", { chat_id, message_thread_id }, signal);
 	}
 
 	// ── Chat info ────────────────────────────────────────────────────────────
