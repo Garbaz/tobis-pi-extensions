@@ -7,12 +7,11 @@
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import type { TelegramConfig, MediaProcessor, MediaType } from "./types.js";
 
 const CONFIG_DIR = join(homedir(), ".pi", "agent", "extensions", "pi-tobis-extensions");
 const CONFIG_PATH = join(CONFIG_DIR, "telegram.json");
-const STATE_PATH = join(tmpdir(), "pi-telegram-state.json");
 
 const DEFAULT_CONFIG: TelegramConfig = {
 	botToken: undefined,
@@ -101,18 +100,7 @@ export async function updateConfig(partial: Partial<TelegramConfig>): Promise<Te
 }
 
 // ── State (runtime polling cursor) ───────────────────────────────────────────
+// MOVED to relay.ts — state file now lives in ~/.pi/run/telegram/state.json
+// Re-exported for backward compatibility.
 
-/** Read lastUpdateId from state file. Returns undefined if no state exists. */
-export async function readLastUpdateId(): Promise<number | undefined> {
-	try {
-		const raw = JSON.parse(await readFile(STATE_PATH, "utf8"));
-		return typeof raw.lastUpdateId === "number" ? raw.lastUpdateId : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-/** Persist lastUpdateId to state file. */
-export async function saveLastUpdateId(lastUpdateId: number): Promise<void> {
-	await writeFile(STATE_PATH, JSON.stringify({ lastUpdateId }, null, "\t") + "\n", "utf8");
-}
+export { readLastUpdateId, saveLastUpdateId, STATE_PATH } from "./relay.js";

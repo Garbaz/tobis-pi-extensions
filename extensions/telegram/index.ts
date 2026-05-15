@@ -12,6 +12,7 @@ import type { TelegramConfig, MediaType } from "./types.js";
 import { registerTools } from "./tools.js";
 import { readSessionData, writeSessionData, deleteSessionData } from "./topics.js";
 import type { TelegramSessionData } from "./topics.js";
+import { RelayServer, RelayClient, tryAcquireRelayLock, releaseRelayLock } from "./relay.js";
 
 // ── Topic Name Generation ────────────────────────────────────────────────────
 // Derive a human-readable topic name from the session context.
@@ -74,6 +75,12 @@ async function setupSessionTopic(ctx: ExtensionContext): Promise<void> {
 	// Write sentinel even if topics are disabled (marks session as telegram-connected)
 	if (!sessionData) {
 		await writeSessionData(sessionDir, {});
+	}
+
+	// Subscribe to this thread via the relay client (if we're not the relay)
+	const sessionDataAfter = await readSessionData(sessionDir);
+	if (sessionDataAfter?.threadId && relayClient?.isConnected()) {
+		relayClient.subscribe(sessionDataAfter.threadId, currentSessionId);
 	}
 }
 
@@ -177,7 +184,7 @@ function updateStatus(ctx: ExtensionContext, error?: string): void {
 		ctx.ui.setStatus("telegram", undefined);
 		return;
 	}
-	if (!polling?.isRunning()) {
+	if (!isTelegramConnected()) {
 		ctx.ui.setStatus("telegram", undefined);
 		return;
 	}
@@ -194,8 +201,18 @@ function updateStatus(ctx: ExtensionContext, error?: string): void {
 // so we can update the status bar and persist config.
 
 let statusCtx: ExtensionContext | undefined;
-/** Telegram polling cursor — persisted to /tmp, not config. */
+/** Telegram polling cursor — persisted to ~/.pi/run/telegram/state.json, not config. */
 let lastUpdateId: number | undefined;
+
+/** Relay mode: are we the poller (relay) or a subscriber (client)? */
+let isRelay = false;
+let relayServer: RelayServer | undefined;
+let relayClient: RelayClient | undefined;
+
+/** Whether telegram is currently connected (either as relay poller or relay client). */
+function isTelegramConnected(): boolean {
+	return polling?.isRunning() === true || relayClient?.isConnected() === true;
+}
 
 function onBridgeStateChange(): void {
 	if (statusCtx) updateStatus(statusCtx);
@@ -208,7 +225,7 @@ async function connect(ctx: ExtensionCommandContext | ExtensionContext): Promise
 		ctx.ui.notify("Telegram: no bot token configured. Use /telegram setup", "warning");
 		return;
 	}
-	if (polling?.isRunning()) {
+	if (polling?.isRunning() || relayClient?.isConnected()) {
 		// Already connected — just update the context reference
 		statusCtx = ctx;
 		return;
@@ -264,25 +281,64 @@ async function connect(ctx: ExtensionCommandContext | ExtensionContext): Promise
 		bridge.setTopicsEnabled(true, config.allowedUserId);
 	}
 
-	polling = new TelegramPolling(api, {
+	// ── Relay election: try to become the poller ──────────────────────────
+	const gotLock = await tryAcquireRelayLock();
+
+	if (gotLock) {
+		// We are the relay — own the polling loop and distribute updates
+		await startAsRelay(ctx);
+	} else {
+		// Another instance is polling — connect as a client
+		await startAsClient(ctx);
+	}
+}
+
+/** Start as the relay: own the polling loop and distribute updates to clients. */
+async function startAsRelay(ctx: ExtensionCommandContext | ExtensionContext): Promise<void> {
+	isRelay = true;
+	relayServer = new RelayServer();
+
+	try {
+		await relayServer.start((update, threadId) => {
+			// Relay server routes updates to subscribed clients
+			// (The relay itself also processes updates via the polling callback)
+		});
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		console.error(`[telegram] Failed to start relay server: ${msg}`);
+		// Fall back to single-process polling (no relay)
+		isRelay = false;
+		relayServer = undefined;
+		await releaseRelayLock();
+	}
+
+	polling = new TelegramPolling(api!, {
 		onUpdate: async (update) => {
 			// Track offset for resume
 			if (update.update_id >= (lastUpdateId ?? 0)) {
 				lastUpdateId = update.update_id + 1;
 			}
-			await bridge.handleUpdate(update, ctx);
+			// Process locally
+			await bridge!.handleUpdate(update, ctx);
+			// Route to relay clients
+			relayServer?.routeUpdate(update);
+			// Broadcast cursor so clients can save it for failover
+			if (lastUpdateId !== undefined) {
+				relayServer?.broadcastCursor(lastUpdateId);
+			}
 		},
 		onError: (err) => {
 			ctx.ui.notify(`Telegram: polling error — ${err.message}`, "error");
 			updateStatus(ctx, err.message);
 		},
 		onStart: () => {
+			const mode = isRelay ? " (relay)" : "";
 			if (topicsEnabled) {
-				ctx.ui.notify(`Telegram: connected as @${botUsername} (topics enabled)`, "info");
+				ctx.ui.notify(`Telegram: connected as @${botUsername} (topics enabled)${mode}`, "info");
 			} else if (config.topics === false) {
-				ctx.ui.notify(`Telegram: connected as @${botUsername} (topics disabled in config)`, "info");
+				ctx.ui.notify(`Telegram: connected as @${botUsername} (topics disabled in config)${mode}`, "info");
 			} else {
-				ctx.ui.notify(`Telegram: connected as @${botUsername} (topics unavailable — enable via BotFather)`, "info");
+				ctx.ui.notify(`Telegram: connected as @${botUsername} (topics unavailable — enable via BotFather)${mode}`, "info");
 			}
 			updateStatus(ctx);
 		},
@@ -296,13 +352,112 @@ async function connect(ctx: ExtensionCommandContext | ExtensionContext): Promise
 	updateStatus(ctx);
 }
 
-async function disconnect(ctx: ExtensionCommandContext | ExtensionContext): Promise<void> {
-	if (polling?.isRunning()) {
-		await polling.stop();
-		// Save polling cursor for resume
-		if (lastUpdateId !== undefined) {
-			await saveLastUpdateId(lastUpdateId);
+/** Start as a client: connect to the relay's Unix socket and receive routed updates. */
+async function startAsClient(ctx: ExtensionCommandContext | ExtensionContext): Promise<void> {
+	isRelay = false;
+	relayClient = new RelayClient();
+
+	const connected = await relayClient.connect(
+		// onUpdate: process routed updates through the bridge
+		async (update) => {
+			if (update.update_id >= (lastUpdateId ?? 0)) {
+				lastUpdateId = update.update_id + 1;
+			}
+			await bridge!.handleUpdate(update, ctx);
+		},
+		// onDisconnect: attempt failover
+		async () => {
+			await attemptFailover(ctx);
+		},
+	);
+
+	if (connected) {
+		// Subscribe to General topic (threadId 0) for unroutable messages
+		relayClient.subscribe(0, "general");
+		const mode = isRelay ? " (relay)" : " (client)";
+		if (topicsEnabled) {
+			ctx.ui.notify(`Telegram: connected as @${botUsername} (topics enabled)${mode}`, "info");
+			} else if (config.topics === false) {
+			ctx.ui.notify(`Telegram: connected as @${botUsername} (topics disabled in config)${mode}`, "info");
+		} else {
+			ctx.ui.notify(`Telegram: connected as @${botUsername} (topics unavailable — enable via BotFather)${mode}`, "info");
 		}
+		updateStatus(ctx);
+	} else {
+		// Can't connect to relay — try to become the relay ourselves
+		console.warn("[telegram] Cannot connect to relay — attempting to take over");
+		await attemptFailover(ctx);
+	}
+}
+
+/** Attempt to become the relay after the current relay dies or is unreachable. */
+async function attemptFailover(ctx: ExtensionCommandContext | ExtensionContext): Promise<void> {
+	// Try to acquire the relay lock
+	const gotLock = await tryAcquireRelayLock();
+	if (gotLock) {
+		console.log("[telegram] Acquired relay lock — becoming the poller");
+		// Clean up client state
+		relayClient?.disconnect();
+		relayClient = undefined;
+		// Start as relay
+		await startAsRelay(ctx);
+		// Re-subscribe all known sessions through the relay server
+		// (The relay processes updates locally, so no subscription needed for itself)
+	} else {
+		// Another client won the race — try to reconnect as a client
+		console.log("[telegram] Another instance became relay — reconnecting as client");
+		relayClient?.disconnect();
+		relayClient = undefined;
+
+		// Brief backoff to let the new relay start its socket
+		await new Promise((resolve) => setTimeout(resolve, 500));
+
+		// Retry as client
+		const retryCount = 5;
+		for (let i = 0; i < retryCount; i++) {
+			relayClient = new RelayClient();
+			const connected = await relayClient.connect(
+				async (update) => {
+					if (update.update_id >= (lastUpdateId ?? 0)) {
+						lastUpdateId = update.update_id + 1;
+					}
+					await bridge!.handleUpdate(update, ctx);
+				},
+				async () => {
+					await attemptFailover(ctx);
+				},
+			);
+			if (connected) break;
+
+			// Wait before retrying
+			await new Promise((resolve) => setTimeout(resolve, 500 * (i + 1)));
+			relayClient = undefined;
+		}
+
+		if (!relayClient?.isConnected()) {
+			ctx.ui.notify("Telegram: failed to connect to relay after failover", "error");
+			updateStatus(ctx, "relay failover failed");
+		}
+	}
+}
+
+async function disconnect(ctx: ExtensionCommandContext | ExtensionContext): Promise<void> {
+	if (isRelay) {
+		// We are the relay — stop polling and server
+		if (polling?.isRunning()) {
+			await polling.stop();
+			if (lastUpdateId !== undefined) {
+				await saveLastUpdateId(lastUpdateId);
+			}
+		}
+		await relayServer?.stop();
+		relayServer = undefined;
+		await releaseRelayLock();
+		isRelay = false;
+	} else {
+		// We are a client — just disconnect from the relay
+		relayClient?.disconnect();
+		relayClient = undefined;
 	}
 	bridge?.stopTypingIndicator();
 	bridge?.unlock();
@@ -344,7 +499,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 				case "connect":
 					await connect(ctx);
 					// Write sentinel so this session auto-connects on resume
-					if (currentSessionId && polling?.isRunning()) {
+					if (currentSessionId && isTelegramConnected()) {
 						await setupSessionTopic(ctx);
 					}
 					break;
@@ -376,7 +531,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 					const lines: string[] = [];
 					lines.push(`bot: ${botUsername ? `@${botUsername}` : "not configured"}`);
 					lines.push(`user: ${config.allowedUserId ?? "not paired"}`);
-					lines.push(`polling: ${polling?.isRunning() ? "running" : "stopped"}`);
+					lines.push(`mode: ${isRelay ? "relay (polling)" : relayClient?.isConnected() ? "client" : "stopped"}`);
 					lines.push(`chat: ${bridge?.getActiveChatId() ?? "none"}`);
 					lines.push(`topics: ${topicsEnabled ? "enabled" : "disabled"}`);
 					if (bridge?.getTopicManager()) {
@@ -425,20 +580,20 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		// Check if this session was previously connected (sentinel file in session dir)
 		const sessionData = await readSessionData(ctx.sessionManager.getSessionDir());
 
-		if (!sessionData && !polling?.isRunning()) {
+		if (!sessionData && !isTelegramConnected()) {
 			// New session with no telegram history — don't auto-connect
 			// User must run /telegram connect to enable telegram for this session
 			updateStatus(ctx);
 			return;
 		}
 
-		// Auto-connect if polling isn't already running
-		if (config.botToken && !polling?.isRunning()) {
+		// Auto-connect if not already connected
+		if (config.botToken && !isTelegramConnected()) {
 			await connect(ctx);
 		}
 
 		// Set up forum topic for this session (if connected and paired)
-		if (polling?.isRunning() && config.allowedUserId) {
+		if (isTelegramConnected() && config.allowedUserId) {
 			await setupSessionTopic(ctx);
 		}
 	});
@@ -448,8 +603,13 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		const { reason } = event as { reason: string };
 		const sessionId = ctx.sessionManager.getSessionId();
 
-		// Close the session's forum topic
+		// Close the session's forum topic and unsubscribe from relay
 		if (sessionId && bridge) {
+			// Unsubscribe from relay
+			const topic = bridge.getTopicManager()?.getSessionTopic(sessionId);
+			if (topic?.threadId && relayClient?.isConnected()) {
+				relayClient.unsubscribe(topic.threadId);
+			}
 			await bridge.unregisterSession(sessionId);
 		}
 
@@ -459,8 +619,19 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		// Only fully disconnect on process exit
 		// On reload/new/resume/fork, polling continues — the next session_start will re-register
 		if (reason === "quit") {
-			if (polling?.isRunning()) {
-				await polling.stop();
+			if (isRelay) {
+				// We are the relay — stop polling and notify clients
+				if (polling?.isRunning()) {
+					await polling.stop();
+				}
+				await relayServer?.stop();
+				relayServer = undefined;
+				await releaseRelayLock();
+				isRelay = false;
+			} else {
+				// We are a client — just disconnect from relay
+				relayClient?.disconnect();
+				relayClient = undefined;
 			}
 			bridge?.stopTypingIndicator();
 			bridge?.unlock();
