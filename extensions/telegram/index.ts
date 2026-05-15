@@ -10,6 +10,7 @@ import type { TelegramTurnContext } from "./bridge.js";
 import { readConfig, saveConfigField, updateConfig, readLastUpdateId, saveLastUpdateId } from "./config.js";
 import type { TelegramConfig, MediaType } from "./types.js";
 import { registerTools } from "./tools.js";
+import { readTopicData, writeTopicData, deleteTopicData } from "./topics.js";
 
 // ── Topic Name Generation ────────────────────────────────────────────────────
 // Derive a human-readable topic name from the session context.
@@ -351,8 +352,9 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 
 	// ── Events ───────────────────────────────────────────────────────────────
 
-	// On session start: auto-connect and create a forum topic for this session
-	pi.on("session_start", async (_event: unknown, ctx: ExtensionContext) => {
+	// On session start: auto-connect and set up forum topic for this session
+	pi.on("session_start", async (event: unknown, ctx: ExtensionContext) => {
+		const { reason } = event as { reason: string };
 		config = await readConfig();
 		currentSessionId = ctx.sessionManager.getSessionId();
 
@@ -366,12 +368,33 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 			updateStatus(ctx);
 		}
 
-		// Create a forum topic for this session (if topics are enabled and we're connected)
+		// Set up forum topic for this session (if topics are enabled and we're connected)
 		if (currentSessionId && bridge && bridge.getTopicManager() && config.allowedUserId) {
 			const label = getSessionLabel(ctx);
 			lastSessionLabel = label;
+
+			// On reload/resume: restore the existing topic from the session directory
+			const isResumption = reason === "reload" || reason === "resume";
+			if (isResumption) {
+				const existing = await readTopicData(ctx.sessionManager.getSessionDir());
+				if (existing) {
+					const threadId = await bridge.restoreSession(currentSessionId, existing.threadId, existing.name);
+					if (threadId !== undefined) {
+						// Rename if session label changed since last time
+						if (existing.name !== label) {
+							await bridge.getTopicManager()!.renameTopic(currentSessionId, label);
+							await writeTopicData(ctx.sessionManager.getSessionDir(), { threadId, name: label });
+						}
+						ctx.ui.notify(`Telegram: resumed topic "${label}"`, "info");
+					}
+					return; // restored — don't create a new one
+				}
+			}
+
+			// New session, fork, or startup with no persisted topic: create one
 			const threadId = await bridge.registerSession(currentSessionId, label);
 			if (threadId !== undefined) {
+				await writeTopicData(ctx.sessionManager.getSessionDir(), { threadId, name: label });
 				ctx.ui.notify(`Telegram: created topic "${label}"`, "info");
 			}
 		}
@@ -436,6 +459,11 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 			if (label !== lastSessionLabel) {
 				await bridge.getTopicManager()!.renameTopic(currentSessionId, label);
 				lastSessionLabel = label;
+				// Persist the name change
+				const topic = bridge.getTopicManager()!.getSessionTopic(currentSessionId);
+				if (topic) {
+					await writeTopicData(ctx.sessionManager.getSessionDir(), { threadId: topic.threadId, name: label });
+				}
 			}
 		}
 	}) as never);

@@ -143,6 +143,23 @@ export class TelegramBridge {
 		return threadId;
 	}
 
+	/** Restore a session's existing forum topic (e.g., on reload/resume).
+	 *  Reopens the topic and re-registers it in the mapping without creating a new one.
+	 *  Returns the thread ID, or undefined if topics are disabled. */
+	async restoreSession(sessionId: string, threadId: number, name: string, signal?: AbortSignal): Promise<number | undefined> {
+		if (!this.topicManager) return undefined;
+
+		const restoredThreadId = await this.topicManager.restoreSession(sessionId, threadId, name, signal);
+		if (restoredThreadId !== undefined) {
+			// Create an outgoing handler for this session
+			const outgoing = new OutgoingHandler(this.api);
+			if (this.activeChatId) outgoing.setActiveChatId(this.activeChatId);
+			outgoing.setThreadId(restoredThreadId);
+			this.outgoingBySession.set(sessionId, outgoing);
+		}
+		return restoredThreadId;
+	}
+
 	/** Unregister a session — close and remove its forum topic. */
 	async unregisterSession(sessionId: string, signal?: AbortSignal): Promise<void> {
 		if (this.topicManager) {

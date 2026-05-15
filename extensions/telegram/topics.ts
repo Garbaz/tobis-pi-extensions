@@ -5,8 +5,43 @@
 
 import type { TelegramApi } from "./api.js";
 import type { ForumTopic } from "./types.js";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { join } from "node:path";
 
-// ── Session → Topic mapping ──────────────────────────────────────────────────
+// ── Topic Persistence ──────────────────────────────────────────────────────
+// Persists session→topic mapping to the session directory so topics survive
+// reloads and resumes. File: <sessionDir>/telegram-topic.json
+
+export interface TopicPersistData {
+	threadId: number;
+	name: string;
+}
+
+/** Read persisted topic data from a session directory. */
+export async function readTopicData(sessionDir: string): Promise<TopicPersistData | undefined> {
+	try {
+		const raw = await readFile(join(sessionDir, "telegram-topic.json"), "utf-8");
+		return JSON.parse(raw) as TopicPersistData;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Write topic data to a session directory. */
+export async function writeTopicData(sessionDir: string, data: TopicPersistData): Promise<void> {
+	await mkdir(sessionDir, { recursive: true });
+	await writeFile(join(sessionDir, "telegram-topic.json"), JSON.stringify(data, null, 2), "utf-8");
+}
+
+/** Delete topic data from a session directory. */
+export async function deleteTopicData(sessionDir: string): Promise<void> {
+	try {
+		const { unlink } = await import("node:fs/promises");
+		await unlink(join(sessionDir, "telegram-topic.json"));
+	} catch {
+		// File may not exist — ignore
+	}
+}
 
 export interface SessionTopic {
 	/** The Telegram message_thread_id for this session's topic. */
@@ -73,7 +108,36 @@ export class TopicManager {
 			const msg = err instanceof Error ? err.message : String(err);
 			console.warn(`[telegram] Failed to create forum topic "${topicName}": ${msg}`);
 			return undefined;
+			}
+	}
+
+	/** Restore a previously created topic for a session (e.g., on reload/resume).
+	 *  Reopens the topic if it was closed, and re-registers it in the mapping.
+	 *  Returns the thread ID, or undefined if topics are disabled. */
+	async restoreSession(sessionId: string, threadId: number, name: string, signal?: AbortSignal): Promise<number | undefined> {
+		if (!this.topicsEnabled) return undefined;
+
+		this.sessions.set(sessionId, {
+			threadId,
+			name,
+			isOpen: false, // will be reopened below
+		});
+		this.threadToSession.set(threadId, sessionId);
+
+		// Reopen the topic (it was closed on session_shutdown)
+		try {
+			await this.api.reopenForumTopic(this.chatId, threadId, signal);
+			this.sessions.get(sessionId)!.isOpen = true;
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			console.warn(`[telegram] Failed to reopen forum topic "${name}" (thread ${threadId}): ${msg}`);
+			// Even if reopen fails, the topic is still registered — messages may still work
 		}
+
+		// Rename if the session label changed while we were away
+		// (caller will handle rename tracking)
+
+		return threadId;
 	}
 
 	/** Close a session's topic (marks it as inactive in Telegram). */
