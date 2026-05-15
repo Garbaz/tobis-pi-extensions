@@ -8,36 +8,40 @@ import type { ForumTopic } from "./types.js";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
-// ── Topic Persistence ──────────────────────────────────────────────────────
-// Persists session→topic mapping to the session directory so topics survive
-// reloads and resumes. File: <sessionDir>/telegram-topic.json
+// ── Session Persistence ─────────────────────────────────────────────────────
+// Persists session telegram state to the session directory so connections
+// survive reloads and resumes. File: <sessionDir>/telegram-session.json
+// If this file exists, the session was connected to telegram.
+// If threadId is present, the session has a forum topic to resume.
 
-export interface TopicPersistData {
-	threadId: number;
-	name: string;
+export interface TelegramSessionData {
+	/** Forum topic thread ID (present if topics are enabled). */
+	threadId?: number;
+	/** Forum topic name (present if topics are enabled). */
+	threadName?: string;
 }
 
-/** Read persisted topic data from a session directory. */
-export async function readTopicData(sessionDir: string): Promise<TopicPersistData | undefined> {
+/** Read persisted session data. Returns undefined if not connected to telegram. */
+export async function readSessionData(sessionDir: string): Promise<TelegramSessionData | undefined> {
 	try {
-		const raw = await readFile(join(sessionDir, "telegram-topic.json"), "utf-8");
-		return JSON.parse(raw) as TopicPersistData;
+		const raw = await readFile(join(sessionDir, "telegram-session.json"), "utf-8");
+		return JSON.parse(raw) as TelegramSessionData;
 	} catch {
 		return undefined;
 	}
 }
 
-/** Write topic data to a session directory. */
-export async function writeTopicData(sessionDir: string, data: TopicPersistData): Promise<void> {
+/** Write session data (marks this session as connected to telegram). */
+export async function writeSessionData(sessionDir: string, data: TelegramSessionData): Promise<void> {
 	await mkdir(sessionDir, { recursive: true });
-	await writeFile(join(sessionDir, "telegram-topic.json"), JSON.stringify(data, null, 2), "utf-8");
+	await writeFile(join(sessionDir, "telegram-session.json"), JSON.stringify(data, null, 2), "utf-8");
 }
 
-/** Delete topic data from a session directory. */
-export async function deleteTopicData(sessionDir: string): Promise<void> {
+/** Delete session data (marks this session as disconnected from telegram). */
+export async function deleteSessionData(sessionDir: string): Promise<void> {
 	try {
 		const { unlink } = await import("node:fs/promises");
-		await unlink(join(sessionDir, "telegram-topic.json"));
+		await unlink(join(sessionDir, "telegram-session.json"));
 	} catch {
 		// File may not exist — ignore
 	}

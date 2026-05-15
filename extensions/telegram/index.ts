@@ -10,7 +10,8 @@ import type { TelegramTurnContext } from "./bridge.js";
 import { readConfig, saveConfigField, updateConfig, readLastUpdateId, saveLastUpdateId } from "./config.js";
 import type { TelegramConfig, MediaType } from "./types.js";
 import { registerTools } from "./tools.js";
-import { readTopicData, writeTopicData, deleteTopicData } from "./topics.js";
+import { readSessionData, writeSessionData, deleteSessionData } from "./topics.js";
+import type { TelegramSessionData } from "./topics.js";
 
 // ── Topic Name Generation ────────────────────────────────────────────────────
 // Derive a human-readable topic name from the session context.
@@ -24,6 +25,45 @@ function getSessionLabel(ctx: ExtensionContext): string {
 	const cwd = ctx.sessionManager.getCwd();
 	const parts = cwd.split("/");
 	return parts[parts.length - 1] || "pi-session";
+}
+
+// ── Session Topic Setup ──────────────────────────────────────────────────────
+// Creates or resumes a forum topic for the current session.
+// Called from session_start, /telegram connect, and onPair.
+
+async function setupSessionTopic(ctx: ExtensionContext): Promise<void> {
+	if (!currentSessionId || !bridge?.getTopicManager() || !config.allowedUserId) return;
+
+	const label = getSessionLabel(ctx);
+	lastSessionLabel = label;
+	const sessionDir = ctx.sessionManager.getSessionDir();
+
+	// Check for existing session data (resume vs create)
+	const sessionData = await readSessionData(sessionDir);
+	if (sessionData?.threadId) {
+		// Resume existing topic
+		const threadId = await bridge.restoreSession(currentSessionId, sessionData.threadId, sessionData.threadName ?? label);
+		if (threadId !== undefined) {
+			// Rename if session label changed since last time
+			if (sessionData.threadName !== label) {
+				await bridge.getTopicManager()!.renameTopic(currentSessionId, label);
+				await writeSessionData(sessionDir, { threadId, threadName: label });
+			}
+			ctx.ui.notify(`Telegram: resumed topic "${label}"`, "info");
+		}
+	} else if (topicsEnabled) {
+		// Create new topic
+		const threadId = await bridge.registerSession(currentSessionId, label);
+		if (threadId !== undefined) {
+			await writeSessionData(sessionDir, { threadId, threadName: label });
+			ctx.ui.notify(`Telegram: created topic "${label}"`, "info");
+		}
+	}
+
+	// Write sentinel even if topics are disabled (marks session as telegram-connected)
+	if (!sessionData) {
+		await writeSessionData(sessionDir, {});
+	}
 }
 
 // ── System Prompt Injection ──────────────────────────────────────────────────
@@ -156,7 +196,8 @@ async function connect(ctx: ExtensionCommandContext | ExtensionContext): Promise
 		return;
 	}
 	if (polling?.isRunning()) {
-		ctx.ui.notify("Telegram: already connected", "info");
+		// Already connected — just update the context reference
+		statusCtx = ctx;
 		return;
 	}
 
@@ -187,9 +228,14 @@ async function connect(ctx: ExtensionCommandContext | ExtensionContext): Promise
 			}
 			statusCtx?.ui.notify(`Telegram: paired with ${userName} (${userId})`, "info");
 			onBridgeStateChange();
+			// Set up topic for the current session after pairing
+			if (statusCtx) {
+				await setupSessionTopic(statusCtx);
+			}
 		},
 		onChatLock: () => {
-			// Chat locked — enable topics if not already done (e.g. on reconnect)
+			// In topic mode, the chat ID is known from pairing — no lock needed
+			// In non-topic mode, locking still useful for single-session flow
 			if (topicsEnabled) {
 				bridge!.setTopicsEnabled(true, config.allowedUserId);
 			}
@@ -284,6 +330,10 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 			switch (sub) {
 				case "connect":
 					await connect(ctx);
+					// Write sentinel so this session auto-connects on resume
+					if (currentSessionId && polling?.isRunning()) {
+						await setupSessionTopic(ctx);
+					}
 					break;
 
 				case "disconnect":
@@ -352,75 +402,59 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 
 	// ── Events ───────────────────────────────────────────────────────────────
 
-	// On session start: auto-connect and set up forum topic for this session
+	// On session start: auto-connect if this session was previously connected to telegram
 	pi.on("session_start", async (event: unknown, ctx: ExtensionContext) => {
 		const { reason } = event as { reason: string };
 		config = await readConfig();
 		currentSessionId = ctx.sessionManager.getSessionId();
 
-		// Auto-connect if token is configured and no other session holds the lock
-		if (config.botToken && config.allowedUserId) {
-			await connect(ctx);
-		} else if (config.botToken) {
-			// Token exists but not paired yet — connect to allow pairing
-			await connect(ctx);
-		} else {
+		// Check if this session was previously connected (sentinel file in session dir)
+		const sessionData = await readSessionData(ctx.sessionManager.getSessionDir());
+
+		if (!sessionData && !polling?.isRunning()) {
+			// New session with no telegram history — don't auto-connect
+			// User must run /telegram connect to enable telegram for this session
 			updateStatus(ctx);
+			return;
 		}
 
-		// Set up forum topic for this session (if topics are enabled and we're connected)
-		if (currentSessionId && bridge && bridge.getTopicManager() && config.allowedUserId) {
-			const label = getSessionLabel(ctx);
-			lastSessionLabel = label;
+		// Auto-connect if polling isn't already running
+		if (config.botToken && !polling?.isRunning()) {
+			await connect(ctx);
+		}
 
-			// On reload/resume: restore the existing topic from the session directory
-			const isResumption = reason === "reload" || reason === "resume";
-			if (isResumption) {
-				const existing = await readTopicData(ctx.sessionManager.getSessionDir());
-				if (existing) {
-					const threadId = await bridge.restoreSession(currentSessionId, existing.threadId, existing.name);
-					if (threadId !== undefined) {
-						// Rename if session label changed since last time
-						if (existing.name !== label) {
-							await bridge.getTopicManager()!.renameTopic(currentSessionId, label);
-							await writeTopicData(ctx.sessionManager.getSessionDir(), { threadId, name: label });
-						}
-						ctx.ui.notify(`Telegram: resumed topic "${label}"`, "info");
-					}
-					return; // restored — don't create a new one
-				}
-			}
-
-			// New session, fork, or startup with no persisted topic: create one
-			const threadId = await bridge.registerSession(currentSessionId, label);
-			if (threadId !== undefined) {
-				await writeTopicData(ctx.sessionManager.getSessionDir(), { threadId, name: label });
-				ctx.ui.notify(`Telegram: created topic "${label}"`, "info");
-			}
+		// Set up forum topic for this session (if connected and paired)
+		if (polling?.isRunning() && config.allowedUserId) {
+			await setupSessionTopic(ctx);
 		}
 	});
 
-	// On session shutdown: close the topic and clean up
-	pi.on("session_shutdown", async (_event: unknown, ctx: ExtensionContext) => {
+	// On session shutdown: close the session's topic. Only stop polling on process exit.
+	pi.on("session_shutdown", async (event: unknown, ctx: ExtensionContext) => {
+		const { reason } = event as { reason: string };
 		const sessionId = ctx.sessionManager.getSessionId();
 
-		// Close and remove the session's forum topic
+		// Close the session's forum topic
 		if (sessionId && bridge) {
 			await bridge.unregisterSession(sessionId);
 		}
 
-		// Clean disconnect: stop polling, free the Telegram API lock
-		if (polling?.isRunning()) {
-			await polling.stop();
-		}
-		bridge?.stopTypingIndicator();
-		bridge?.unlock();
-		botUsername = undefined;
 		currentSessionId = undefined;
 		lastSessionLabel = undefined;
-		// Persist polling cursor so we resume cleanly
-		if (lastUpdateId !== undefined) {
-			await saveLastUpdateId(lastUpdateId);
+
+		// Only fully disconnect on process exit
+		// On reload/new/resume/fork, polling continues — the next session_start will re-register
+		if (reason === "quit") {
+			if (polling?.isRunning()) {
+				await polling.stop();
+			}
+			bridge?.stopTypingIndicator();
+			bridge?.unlock();
+			botUsername = undefined;
+			// Persist polling cursor so we resume cleanly
+			if (lastUpdateId !== undefined) {
+				await saveLastUpdateId(lastUpdateId);
+			}
 		}
 	});
 
@@ -462,7 +496,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 				// Persist the name change
 				const topic = bridge.getTopicManager()!.getSessionTopic(currentSessionId);
 				if (topic) {
-					await writeTopicData(ctx.sessionManager.getSessionDir(), { threadId: topic.threadId, name: label });
+					await writeSessionData(ctx.sessionManager.getSessionDir(), { threadId: topic.threadId, threadName: label });
 				}
 			}
 		}
