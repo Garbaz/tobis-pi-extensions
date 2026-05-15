@@ -58,6 +58,14 @@ async function handleMessage(
 	ctx: ExtensionContext,
 	isEdit = false,
 ): Promise<IncomingResult | undefined> {
+	// Skip forum topic service messages — they come from the bot itself,
+	// not the user, and carry no user content.
+	if (message.forum_topic_created || message.forum_topic_edited ||
+	    message.forum_topic_closed || message.forum_topic_reopened ||
+	    message.general_forum_topic_hidden || message.general_forum_topic_unhidden) {
+		return undefined;
+	}
+
 	// Auth check
 	if (config.allowedUserId !== undefined && message.from?.id !== config.allowedUserId) {
 		await api.sendMessage({

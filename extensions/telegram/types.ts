@@ -237,6 +237,15 @@ export interface Message {
 	left_chat_member?: User;
 	group_chat_created?: true;
 	supergroup_chat_created?: true;
+	/** Forum topic service messages (Bot API 9.4+) */
+	forum_topic_created?: ForumTopicCreated;
+	forum_topic_edited?: ForumTopicEdited;
+	forum_topic_closed?: true;
+	forum_topic_reopened?: true;
+	general_forum_topic_hidden?: true;
+	general_forum_topic_unhidden?: true;
+	/** True if the message is sent to a forum topic. */
+	is_topic_message?: boolean;
 	/** Guest mode (Bot API 10.0) */
 	guest_query_id?: string;
 	guest_bot_caller_user?: User;
@@ -346,6 +355,20 @@ export interface ForumTopic {
 	icon_custom_emoji_id?: string;
 	/** True if the name wasn't specified explicitly and likely needs changing. */
 	is_name_implicit?: true;
+}
+
+/** Service message: forum topic created. */
+export interface ForumTopicCreated {
+	name: string;
+	icon_color?: number;
+	icon_custom_emoji_id?: string;
+	is_name_implicit?: true;
+}
+
+/** Service message: forum topic edited. */
+export interface ForumTopicEdited {
+	name?: string;
+	icon_custom_emoji_id?: string;
 }
 
 // ── sendMessage result ───────────────────────────────────────────────────────
