@@ -21,10 +21,13 @@ function getSessionLabel(ctx: ExtensionContext): string {
 	const name = ctx.sessionManager.getSessionName();
 	if (name) return name;
 
-	// Fall back to CWD basename
+	// Fall back to CWD basename + short session ID for uniqueness
 	const cwd = ctx.sessionManager.getCwd();
 	const parts = cwd.split("/");
-	return parts[parts.length - 1] || "pi-session";
+	const basename = parts[parts.length - 1] || "pi-session";
+	const sessionId = ctx.sessionManager.getSessionId();
+	const shortId = sessionId.slice(-6);
+	return `${basename}-${shortId}`;
 }
 
 // ── Session Topic Setup ──────────────────────────────────────────────────────
@@ -35,6 +38,12 @@ async function setupSessionTopic(ctx: ExtensionContext): Promise<void> {
 	if (!currentSessionId || !bridge?.getTopicManager() || !config.allowedUserId) return;
 
 	const label = getSessionLabel(ctx);
+
+	// If the session has no user-set name, set one in Pi so the TUI also shows it
+	if (!ctx.sessionManager.getSessionName() && pi) {
+		pi.setSessionName(label);
+	}
+
 	lastSessionLabel = label;
 	const sessionDir = ctx.sessionManager.getSessionDir();
 
