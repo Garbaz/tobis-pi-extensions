@@ -242,4 +242,14 @@ export class TopicManager {
 	setChatId(chatId: number): void {
 		this.chatId = chatId;
 	}
+
+	/** Hide the General topic. Falls back gracefully if not supported in private chats. */
+	async hideGeneralTopic(signal?: AbortSignal): Promise<void> {
+		try {
+			await this.api.hideGeneralForumTopic(this.chatId, signal);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			console.warn(`[telegram] Failed to hide General topic: ${msg}`);
+		}
+	}
 }

@@ -310,6 +310,31 @@ export class TelegramApi {
 		return this.call("deleteForumTopic", { chat_id, message_thread_id }, signal);
 	}
 
+	/** Edit the name of the General topic. */
+	editGeneralForumTopic(chat_id: number | string, name: string, signal?: AbortSignal): Promise<true> {
+		return this.call("editGeneralForumTopic", { chat_id, name }, signal);
+	}
+
+	/** Hide the General topic. Fails gracefully in private chats. */
+	hideGeneralForumTopic(chat_id: number | string, signal?: AbortSignal): Promise<true> {
+		return this.call("hideGeneralForumTopic", { chat_id }, signal);
+	}
+
+	/** Unhide the General topic. */
+	unhideGeneralForumTopic(chat_id: number | string, signal?: AbortSignal): Promise<true> {
+		return this.call("unhideGeneralForumTopic", { chat_id }, signal);
+	}
+
+	/** Close the General topic. */
+	closeGeneralForumTopic(chat_id: number | string, signal?: AbortSignal): Promise<true> {
+		return this.call("closeGeneralForumTopic", { chat_id }, signal);
+	}
+
+	/** Reopen the General topic. */
+	reopenGeneralForumTopic(chat_id: number | string, signal?: AbortSignal): Promise<true> {
+		return this.call("reopenGeneralForumTopic", { chat_id }, signal);
+	}
+
 	// ── Chat info ────────────────────────────────────────────────────────────
 
 	getChat(chat_id: number | string, signal?: AbortSignal): Promise<unknown> {

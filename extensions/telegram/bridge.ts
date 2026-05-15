@@ -9,8 +9,8 @@ import type { Message, Update, TelegramConfig, MediaType } from "./types.js";
 import { handleUpdate, type IncomingResult } from "./incoming.js";
 import { OutgoingHandler } from "./outgoing.js";
 import { TopicManager } from "./topics.js";
-import { detectContentTypes } from "./formatting.js";
-import { senderName } from "./formatting.js";
+import { detectContentTypes, senderName } from "./formatting.js";
+import { escapeMarkdownV2 } from "./markdown.js";
 
 // ── Turn Context ──────────────────────────────────────────────────────────────
 // Carried from handleMessage to before_agent_start so the injected system prompt
@@ -49,6 +49,9 @@ export class TelegramBridge {
 
 	/** The currently active session's outgoing handler (for legacy single-session flow). */
 	private activeOutgoing: OutgoingHandler;
+
+	/** The currently active session ID (set by activateSession / index.ts). */
+	private currentSessionId: string | undefined;
 
 	/** The chat ID currently locked to the Pi session. */
 	private activeChatId: number | undefined;
@@ -171,6 +174,7 @@ export class TelegramBridge {
 
 	/** Activate a session's outgoing handler (switch topic context for current turn). */
 	activateSession(sessionId: string): void {
+		this.currentSessionId = sessionId;
 		const outgoing = this.outgoingBySession.get(sessionId);
 		if (outgoing) {
 			this.activeOutgoing = outgoing;
@@ -204,10 +208,35 @@ export class TelegramBridge {
 		if (result) {
 			// Route to the correct outgoing handler based on thread ID
 			const msg = (update.message || update.edited_message) as Message | undefined;
+			const isGeneralTopic = msg && this.topicManager && !msg.message_thread_id;
+
 			if (msg && this.topicManager) {
 				const sessionId = this.topicManager.getSessionByThread(msg.message_thread_id);
 				if (sessionId) {
 					this.activateSession(sessionId);
+				} else if (isGeneralTopic && this.currentSessionId) {
+					// Message in General topic — route to current session but send a hint
+					this.activateSession(this.currentSessionId);
+					const sessionTopic = this.topicManager.getSessionTopic(this.currentSessionId);
+					const rawName = sessionTopic?.name ?? "this session";
+					const escapedName = escapeMarkdownV2(rawName);
+					try {
+						await this.api.sendMessage({
+							chat_id: result.chatId,
+							text: `_Routed to_ ${escapedName}`,
+							parse_mode: "MarkdownV2",
+						});
+					} catch {
+						// Markdown parse failure — try plain text
+						try {
+							await this.api.sendMessage({
+								chat_id: result.chatId,
+							text: `Routed to: ${rawName}`,
+							});
+						} catch {
+							// Non-critical
+						}
+					}
 				}
 			}
 
