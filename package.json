@@ -13,7 +13,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "npx tsx --test extensions/telegram/test-relay.ts extensions/telegram/test-session-registry.ts extensions/telegram/test-session-data.ts extensions/telegram/test-config.ts",
+    "test": "npx tsx --test extensions/telegram/test-instance.ts extensions/telegram/test-session-data.ts extensions/telegram/test-config.ts extensions/telegram/test-relay.ts",
     "test:integration": "npx tsx extensions/telegram/test-media-integration.ts",
     "typecheck": "npx tsc --noEmit"
   },

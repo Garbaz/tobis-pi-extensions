@@ -13,6 +13,9 @@ import type { TelegramApi } from "./api.js";
 import { convertToHtml, splitMessage, MAX_MESSAGE_LENGTH, escapeHtml } from "./markdown.js";
 import type { PendingFile } from "./tools.js";
 import { flushPendingFiles } from "./tools.js";
+import { createLogger } from "./log.js";
+
+const log = createLogger("outgoing");
 
 // ── Tool input formatting ───────────────────────────────────────────────────
 //
@@ -162,10 +165,22 @@ export class OutgoingHandler {
 	private api: TelegramApi;
 	private activeChatId: number | undefined;
 	/** The forum topic thread ID to send messages into (undefined = General/no topic). */
-	private threadId: number | undefined;
+	private _threadId: number | undefined;
+	get threadId(): number | undefined {
+		return this._threadId;
+	}
 
 	/** Message ID of the currently streaming preview message (for editMessageText). */
 	private previewMessageId: number | undefined;
+
+	/** Last preview text sent, to skip redundant edits that would trigger "message is not modified". */
+	private lastPreviewText: string | undefined;
+
+	/** Clear the streaming preview state (message ID + cached text). */
+	private clearPreview(): void {
+		this.previewMessageId = undefined;
+		this.lastPreviewText = undefined;
+	}
 
 	/** ID of the last user message we reacted to (for updating reaction on completion). */
 	private lastUserMessageId: number | undefined;
@@ -211,9 +226,9 @@ export class OutgoingHandler {
 
 	/** Set the forum topic thread ID for outgoing messages. */
 	setThreadId(threadId: number | undefined): void {
-		this.threadId = threadId;
+		this._threadId = threadId;
 		// Reset preview when thread changes (can't edit across topics)
-		this.previewMessageId = undefined;
+		this.clearPreview();
 	}
 
 	/** Get the current thread ID (for echoing into the right topic). */
@@ -255,7 +270,7 @@ export class OutgoingHandler {
 		this.turnBlocks = [];
 		this.currentStreamingText = "";
 		this.pendingEdit = false;
-		this.previewMessageId = undefined;
+		this.clearPreview();
 		this.replyToMessageId = undefined;
 	}
 
@@ -275,7 +290,8 @@ export class OutgoingHandler {
 
 		// No chat → nothing to send (but drain files anyway to avoid stale queue)
 		if (!this.activeChatId) {
-			this.previewMessageId = undefined;
+			log.debug("onAgentEnd: no activeChatId, discarding");
+			this.clearPreview();
 			this.drainPendingFiles(); // discard
 			this.resetTurnState();
 			return;
@@ -288,7 +304,7 @@ export class OutgoingHandler {
 			try {
 				await this.api.deleteMessage(chatId, this.previewMessageId);
 			} catch { /* already gone */ }
-			this.previewMessageId = undefined;
+			this.clearPreview();
 		}
 
 		// Send final response: edit preview in-place with HTML formatting,
@@ -302,6 +318,7 @@ export class OutgoingHandler {
 			const htmlContent = convertToHtml(content);
 			try {
 				const chunks = splitMessage(htmlContent);
+				log.debug({ chunks: chunks.length, contentLen: content.length }, "onAgentEnd: sending");
 
 				if (this.previewMessageId && chunks.length > 0) {
 					// Try to edit the preview message in-place with HTML
@@ -336,6 +353,7 @@ export class OutgoingHandler {
 				}
 			} catch {
 				// HTML split/conversion failed - try plain text as last resort
+				log.warn("onAgentEnd: HTML formatting failed, falling back to plain text");
 				try {
 					const plainChunks = splitMessage(content);
 					if (this.previewMessageId && plainChunks.length > 0) {
@@ -366,7 +384,8 @@ export class OutgoingHandler {
 						}
 					}
 				} catch {
-					await this.setCompletionReaction("\u{274C}");
+					log.warn("onAgentEnd: all send attempts failed");
+					await this.setCompletionReaction("\u{1F44E}");
 					this.drainPendingFiles(); // discard stale queue
 					this.resetTurnState();
 					return;
@@ -379,6 +398,7 @@ export class OutgoingHandler {
 		if (pending.length > 0) {
 			const { errors } = await flushPendingFiles(this.api, chatId, this.threadId, pending);
 			if (errors.length > 0) {
+				log.warn({ errorCount: errors.length, errors: errors.slice(0, 3) }, "onAgentEnd: file send errors");
 				try {
 					await this.api.sendMessage({
 						chat_id: chatId,
@@ -393,7 +413,7 @@ export class OutgoingHandler {
 
 		// Set completion reaction
 		if (content || pending.length > 0) {
-			await this.setCompletionReaction("\u{2705}");
+			await this.setCompletionReaction("\u{1F44D}");
 		}
 
 		this.resetTurnState();
@@ -558,6 +578,10 @@ export class OutgoingHandler {
 			? text.slice(0, MAX_MESSAGE_LENGTH - 20) + "\n\u{2026}[truncated]"
 			: text;
 
+		// Skip if the text hasn't changed since the last edit. Avoids redundant
+		// API calls that would trigger "message is not modified" errors.
+		if (this.previewMessageId && previewText === this.lastPreviewText) return;
+
 		try {
 			if (this.previewMessageId) {
 				await this.api.editMessageText({
@@ -575,6 +599,7 @@ export class OutgoingHandler {
 				});
 				this.previewMessageId = result.message_id;
 			}
+			this.lastPreviewText = previewText;
 		} catch {
 			// editMessageText can fail if message not found or content unchanged - ignore
 		}
@@ -592,11 +617,11 @@ export class OutgoingHandler {
 				text: htmlChunk,
 				parse_mode: "HTML",
 			});
-			this.previewMessageId = undefined;
+			this.clearPreview();
 			return true;
 		} catch {
 			// HTML parse error, message deleted, or content unchanged
-			this.previewMessageId = undefined;
+			this.clearPreview();
 			return false;
 		}
 	}
@@ -612,15 +637,15 @@ export class OutgoingHandler {
 				message_id: this.previewMessageId,
 				text: textChunk,
 			});
-			this.previewMessageId = undefined;
+			this.clearPreview();
 			return true;
 		} catch {
-			this.previewMessageId = undefined;
+			this.clearPreview();
 			return false;
 		}
 	}
 
-	/** Set a reaction on the last user message (e.g. \u{2705} on completion). */
+	/** Set a reaction on the last user message (e.g. \u{1F44D} on completion). */
 	private async setCompletionReaction(emoji: string): Promise<void> {
 		if (this.lastUserChatId && this.lastUserMessageId) {
 			try {

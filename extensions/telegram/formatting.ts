@@ -60,6 +60,25 @@ export function mediaNoProcessorHint(type: MediaType): string {
 	}
 }
 
+/** Format a media message for the agent (no emoji, content first, path at the bottom in brackets).
+ *
+ *  The agent should focus on the content, not the file path. Putting the path
+ *  at the top causes models to try to process the file themselves instead of
+ *  reading the already-processed content.
+ *
+ *  Format:
+ *    [Caption: user text]     (only if caption is present)
+ *    Processed content        (transcription, description, or error/hint)
+ *    [/path/to/file.ext]      (only if localPath is present)
+ */
+export function formatMediaForAgent(type: MediaType, content: string, localPath: string | undefined, caption: string | undefined): string {
+	const parts: string[] = [];
+	if (caption) parts.push(`[Caption: ${caption}]`);
+	parts.push(content);
+	if (localPath) parts.push(`[${localPath}]`);
+	return parts.join("\n\n");
+}
+
 /** Detect which content types are present in a Telegram message. */
 export function detectContentTypes(message: Message): ContentType[] {
 	const types: ContentType[] = [];

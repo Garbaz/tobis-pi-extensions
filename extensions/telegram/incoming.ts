@@ -2,46 +2,26 @@
 // Handles incoming Telegram updates: message routing, auth, content processing,
 // command dispatch, and forwarding to pi.sendUserMessage().
 //
-// Does NOT store ctx long-term. Session-scoped data comes from the sessions map
-// (state.ts). For commands needing ctx (model, stop, compact), uses
-// safeCtx(currentSession()?.ctx) with stderr fallback via notify().
-// Pi API calls (sendUserMessage) go through state.pi which is process-lifetime.
+// Takes an Instance reference as the first parameter — no global state imports.
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TelegramApi } from "./api.js";
-import type { Message, CallbackQuery, ChatMemberUpdated, Update, TelegramConfig, MediaType } from "./types.js";
-import { formatIncomingText, extractText, detectContentTypes, senderName, mediaEmoji, mediaLabel, formatLocation, formatVenue, formatContact, formatDice, formatPoll } from "./formatting.js";
-import { getMediaDir, getMediaInfo, downloadMediaFile, processMedia, truncateProcessorOutput, mediaPlaceholder } from "./media.js";
+import type { Message, ChatMemberUpdated, Update, TelegramConfig, MediaType } from "./types.js";
+import type { Instance } from "./instance.js";
+import { formatIncomingText, formatMediaForAgent, extractText, detectContentTypes, senderName, mediaEmoji, mediaNoProcessorHint, formatLocation, formatVenue, formatContact, formatDice, formatPoll } from "./formatting.js";
+import { getMediaDir, getMediaInfo, downloadMediaFile, processMedia, truncateProcessorOutput } from "./media.js";
 import { checkUserAuth } from "./config.js";
-import { state, currentSession, safeCtx, notify, getActiveChatId, lockToChat, unlockChat, consumeTelegramContext, dispatchCallbackQuery, type PendingUser, notifyError } from "./state.js";
-import { OutgoingHandler } from "./outgoing.js";
-import { createLogger } from "./log.js";
+import { createLogger, runWithContext, withContext, type LogContext } from "./log.js";
 const log = createLogger("incoming");
-
-// ── Accept Callback ──────────────────────────────────────────────────────────
-// Registered by connection.ts during connect(). Called when a user is accepted
-// (first authorized message or /telegram allow).
-
-type AcceptCallback = (userId: number, userName: string) => void | Promise<void>;
-
-let _onAccept: AcceptCallback | undefined;
-
-/** Register the accept callback (called once from connection.ts during connect). */
-export function setAcceptCallback(cb: AcceptCallback): void {
-	_onAccept = cb;
-}
 
 // ── Result Types ─────────────────────────────────────────────────────────────
 
-/** Result of formatting a message for Pi consumption. */
 export interface FormattedMessage {
 	text: string;
 	unprocessed: MediaType[];
-	/** Optional echo to send in the Telegram chat after processing (e.g. media transcription/description). */
+	/** Optional echo to send in the Telegram chat after processing. */
 	mediaEcho?: string;
 }
 
-/** Result from handling an incoming update that produced a forwarded message. */
 export interface IncomingResult {
 	chatId: number;
 	messageId: number;
@@ -49,137 +29,145 @@ export interface IncomingResult {
 }
 
 // ── Update Handler ───────────────────────────────────────────────────────────
-// handleIncomingUpdate is the entry point from connection.ts for all incoming
-// Telegram updates. It:
-// 1. Dispatches callback queries to registered handlers
-// 2. Delegates to handleMessage for text/media messages
-// 3. Routes the message to the correct session (General → thread echo)
-// 4. Sets reaction on the user message
-// 5. Stores turn context for system prompt injection
 
-/** Handle an incoming Telegram update (entry point from connection.ts). */
-export async function handleIncomingUpdate(update: Update): Promise<void> {
-	// 1. Dispatch callback queries first
+/** Handle an incoming Telegram update. Entry point from Instance polling/relay. */
+export async function handleIncomingUpdate(instance: Instance, update: Update): Promise<void> {
+	// Extract chatId and threadId from the update for ALS logging context.
+	const msg = update.message ?? update.edited_message;
+	const chatId = msg?.chat.id ?? update.my_chat_member?.chat.id;
+	const context: LogContext = {};
+	if (chatId !== undefined) context.chatId = chatId;
+	if (msg?.message_thread_id !== undefined) context.threadId = msg.message_thread_id;
+
+	if (chatId !== undefined) {
+		return await runWithContext(context, () => handleIncomingUpdateImpl(instance, update));
+	}
+	// No chat context (e.g. callback_query without message) — run without ALS
+	return await handleIncomingUpdateImpl(instance, update);
+}
+
+async function handleIncomingUpdateImpl(instance: Instance, update: Update): Promise<void> {
+	// 1. Dispatch callback queries
 	if (update.callback_query) {
-		const consumed = await dispatchCallbackQuery(update.callback_query);
+		const consumed = await instance.dispatchCallbackQuery(update.callback_query);
 		if (consumed) return;
-		// Unhandled - answer generically
-		if (state.api) {
+		if (instance.api) {
 			try {
-				await state.api.answerCallbackQuery({ callback_query_id: update.callback_query.id, text: "Received" });
+				await instance.api.answerCallbackQuery({ callback_query_id: update.callback_query.id, text: "Received" });
 			} catch { /* non-critical */ }
 		}
 		return;
 	}
 
 	// 2. Process the message
-	const result = await processUpdate(update);
+	const result = await processUpdate(instance, update);
 
 	if (result) {
 		const msg = (update.message || update.edited_message) as Message | undefined;
 
-		// 3. Route to the correct session's outgoing handler
-		const echoMessageId = await routeToSession(msg, result.chatId);
+		// 3. Route to the correct session
+		const echoMessageId = await routeToSession(instance, msg, result.chatId);
 
-		// 4. Set reaction and track for completion
-		trackUserMessage(result.chatId, echoMessageId ?? result.messageId);
+		// Extend ALS context with resolved session identity (available after routing)
+		const sessionCtx = withContext({
+			threadId: msg?.message_thread_id,
+			sessionId: instance.lastActiveSessionId,
+		});
+		await runWithContext(sessionCtx, async () => {
+			// 4. Set reaction and track for completion
+			trackUserMessage(instance, msg, echoMessageId ?? result.messageId);
 
-		// 5. Store turn context for system prompt injection
-		if (msg) {
-			state.lastTelegramContext = {
-				username: senderName(msg),
-				types: detectContentTypes(msg),
-				unprocessed: result.unprocessed,
-			};
-		}
+			// 5. Store turn context for system prompt injection
+			if (msg) {
+				instance.lastTelegramContext = {
+					username: senderName(msg),
+					types: detectContentTypes(msg),
+					unprocessed: result.unprocessed,
+				};
+			}
+		});
 	}
 }
 
 /** Process a Telegram update, returning result info if it produced a forwarded message. */
-async function processUpdate(update: Update): Promise<IncomingResult | undefined> {
+async function processUpdate(instance: Instance, update: Update): Promise<IncomingResult | undefined> {
 	if (update.message) {
-		return await handleMessage(update.message);
+		return await handleMessage(instance, update.message);
 	} else if (update.edited_message) {
-		return await handleMessage(update.edited_message, true);
+		return await handleMessage(instance, update.edited_message, true);
 	} else if (update.callback_query) {
 		// Handled above in handleIncomingUpdate
 		return undefined;
 	} else if (update.my_chat_member) {
-		await handleChatMemberUpdate(update.my_chat_member);
+		await handleChatMemberUpdate(instance, update.my_chat_member);
 	}
 	return undefined;
 }
 
 /** Handle a Telegram message. Returns chat+message IDs for reaction tracking. */
 async function handleMessage(
+	instance: Instance,
 	message: Message,
 	isEdit = false,
 ): Promise<IncomingResult | undefined> {
-	const api = state.api;
-	const config = state.config;
-	const pi = state.pi;
+	const api = instance.api;
+	const config = instance.config;
+	const pi = instance.pi;
 	if (!api || !pi) return undefined;
 
 	log.debug({ from: message.from?.id, threadId: message.message_thread_id }, "handleMessage");
 
-	// Skip forum topic service messages - they come from the bot itself,
-	// not the user, and carry no user content.
+	// Skip forum topic service messages
 	if (message.forum_topic_created || message.forum_topic_edited ||
 	    message.forum_topic_closed || message.forum_topic_reopened ||
 	    message.general_forum_topic_hidden || message.general_forum_topic_unhidden) {
 		return undefined;
 	}
 
-	// Must have a sender
 	if (!message.from) return undefined;
 
 	// Auth check: blacklist → whitelist → unknown
 	const auth = checkUserAuth(message.from.id, config);
 
 	if (auth === "blocked") {
-		// Silently ignore blacklisted users
+		log.debug({ from: message.from.id }, "auth: blocked");
 		return undefined;
 	}
 
 	if (auth === "unknown") {
-		// Unknown user - queue for auth decision and notify Pi TUI
-		const pending: PendingUser = {
+		const pending = {
 			userId: message.from.id,
 			userName: message.from.username ?? message.from.first_name ?? String(message.from.id),
 			chatId: message.chat.id,
 			timestamp: new Date().toISOString(),
 		};
-		const isNew = !state.pendingUsers.has(message.from.id);
-		state.pendingUsers.set(message.from.id, pending);
+		const isNew = !instance.pendingUsers.has(message.from.id);
+		instance.pendingUsers.set(message.from.id, pending);
 
 		if (isNew) {
-			// Notify Pi TUI - uses session ctx if available, stderr otherwise
-			notify(
-				`Telegram: unknown user @${pending.userName} (${pending.userId}) wants to connect. Use /telegram allow ${pending.userId} or /telegram block ${pending.userId}`,
-				"warning",
-			);
-
-			// Tell the Telegram user we're waiting
+			log.info({ from: message.from.id, userName: pending.userName }, "auth: unknown user pending");
 			await api.sendMessage({
 				chat_id: message.chat.id,
 				text: "\u{23F3} Waiting for authorization\u{2026}",
 				reply_parameters: { message_id: message.message_id },
 			});
+			instance.handlePendingAuth(pending.userId, pending.userName, pending.chatId, api).catch(() => {});
 		}
 		return undefined;
 	}
 
-	// auth === "allowed" - proceed
+	// auth === "allowed" — proceed
 
-	// Auto-lock on first authorized message (no allowedUserId set yet)
+	// Auto-lock on first authorized message
 	if (config.allowedUserId === undefined) {
+		log.info({ from: message.from.id }, "auth: auto-locking");
 		config.allowedUserId = message.from.id;
-		if (_onAccept) await _onAccept(message.from.id, message.from.first_name);
+		if (instance.onAccept) await instance.onAccept(message.from.id, message.from.first_name);
 	}
 
 	// Session lock check
-	const activeChatId = state.activeChatId;
-	if (activeChatId !== undefined && message.chat.id !== activeChatId) {
+	if (instance.pairedChatId !== undefined && message.chat.id !== instance.pairedChatId) {
+		log.debug({ from: message.from.id, pairedChatId: instance.pairedChatId }, "auth: rejected - locked to another chat");
 		await api.sendMessage({
 			chat_id: message.chat.id,
 			text: "\u{1F512} This bot is currently connected to another session. Use /telegram disconnect to release it.",
@@ -188,12 +176,11 @@ async function handleMessage(
 		return undefined;
 	}
 
-	// Lock to this chat on first authorized message
-	if (activeChatId === undefined) {
-		lockToChat(message.chat.id);
+	if (instance.pairedChatId === undefined) {
+		instance.lockToChat(message.chat.id);
 	}
 
-	// Handle special commands (also handle /command@botname format)
+	// Handle commands
 	const text = extractText(message);
 	const lower = text.toLowerCase();
 	const cmd = lower.replace(/@\w+$/, ""); // strip @botname suffix
@@ -203,146 +190,186 @@ async function handleMessage(
 		return undefined;
 	}
 
-	// /model: show current model and available models (needs ctx)
 	if (cmd === "model" || cmd === "/model") {
-		const ctx = safeCtx(currentSession()?.ctx);
-		if (!ctx) {
-			await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} No active session context.", reply_parameters: { message_id: message.message_id } });
-			return undefined;
-		}
-		try {
-			const lines: string[] = [];
-			if (ctx.model) {
-				lines.push(`Current: ${ctx.model.provider}/${ctx.model.id}`);
-				if (ctx.model.name !== ctx.model.id) lines.push(`  ${ctx.model.name}`);
-				if (ctx.model.input.length > 0) lines.push(`  Input: ${ctx.model.input.join(", ")}`);
-			}
-			const available = ctx.modelRegistry.getAvailable();
-			if (available.length > 0) {
-				lines.push("");
-				lines.push(`Available (${available.length}):`);
-				for (const m of available) {
-					const active = ctx.model && m.provider === ctx.model.provider && m.id === ctx.model.id ? " \u{2B50}" : "";
-					lines.push(`  ${m.provider}/${m.id}${active}`);
-				}
-			}
-			await api.sendMessage({
-				chat_id: message.chat.id,
-				text: lines.join("\n") || "No model info available",
-				reply_parameters: { message_id: message.message_id },
-			});
-		} catch {
-			await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} Session context is stale.", reply_parameters: { message_id: message.message_id } });
-		}
+		await handleModelCommand(instance, api, message);
 		return undefined;
 	}
 
 	if (cmd === "stop" || cmd === "/stop") {
-		const ctx = safeCtx(currentSession()?.ctx);
-		if (ctx) {
-			try {
-				if (!ctx.isIdle()) {
-					ctx.abort();
-					await api.sendMessage({
-						chat_id: message.chat.id,
-						text: "\u{23F9} Aborted current turn.",
-						reply_parameters: { message_id: message.message_id },
-					});
-				} else {
-					await api.sendMessage({
-						chat_id: message.chat.id,
-						text: "No active turn to abort.",
-						reply_parameters: { message_id: message.message_id },
-					});
-				}
-			} catch {
-				await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} Session context is stale.", reply_parameters: { message_id: message.message_id } });
-			}
-		} else {
-			await api.sendMessage({
-				chat_id: message.chat.id,
-				text: "Command received, but no active session context.",
-				reply_parameters: { message_id: message.message_id },
-			});
-		}
+		await handleStopCommand(instance, api, message);
 		return undefined;
 	}
 
 	if (cmd === "/status") {
-		const ctx = safeCtx(currentSession()?.ctx);
-		await sendStatusMessage(api, message.chat.id, ctx, message.message_id);
+		await handleStatusCommand(instance, api, message);
 		return undefined;
 	}
 
 	if (cmd === "/compact") {
-		const ctx = safeCtx(currentSession()?.ctx);
-		if (!ctx) {
-			await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} No active session context.", reply_parameters: { message_id: message.message_id } });
-			return undefined;
-		}
-		try {
-			if (!ctx.isIdle()) {
-				await api.sendMessage({
-					chat_id: message.chat.id,
-					text: "Cannot compact while busy. Send \"stop\" first.",
-					reply_parameters: { message_id: message.message_id },
-				});
-				return undefined;
-			}
-			ctx.compact({
-				onComplete: () => {
-					void api.sendMessage({ chat_id: message.chat.id, text: "\u{2705} Compaction completed.", reply_parameters: { message_id: message.message_id } }).catch(() => {});
-				},
-				onError: (error: Error) => {
-					void api.sendMessage({ chat_id: message.chat.id, text: `\u{274C} Compaction failed: ${error.message}`, reply_parameters: { message_id: message.message_id } }).catch(() => {});
-				},
-			});
-			await api.sendMessage({ chat_id: message.chat.id, text: "\u{1F504} Compaction started\u{2026}", reply_parameters: { message_id: message.message_id } });
-		} catch {
-			await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} Session context is stale.", reply_parameters: { message_id: message.message_id } });
-		}
+		await handleCompactCommand(instance, api, message);
 		return undefined;
 	}
 
-	// /new: start a fresh Pi session, auto-connected to Telegram
 	if (cmd === "new" || cmd === "/new") {
-		if (!state.pi) {
-			await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} No Pi API available.", reply_parameters: { message_id: message.message_id } });
-			return undefined;
-		}
-		// Flag so session_start knows this /new came from Telegram and should auto-connect.
-		// (session_start checks pendingNewSession before deciding to auto-connect.)
-		state.pendingNewSession = true;
-		state.pi.sendUserMessage("/new");
-		await api.sendMessage({ chat_id: message.chat.id, text: "\u{1F195} Starting new session\u{2026}", reply_parameters: { message_id: message.message_id } });
+		await handleNewCommand(instance, api, message);
 		return undefined;
 	}
 
 	// Process content and forward to Pi
-	const result = await formatMessageContent(message, isEdit, api, config);
-	if (!result) return undefined; // No actionable content
+	const result = await formatMessageContent(instance, message, isEdit, api, config);
+	if (!result) return undefined;
 
 	// Echo media processor output to the session's topic thread
-	// so the user can see what the bot understood from their photo/voice/etc.
 	if (result.mediaEcho) {
-		const chatId = message.chat.id;
 		void api.sendMessage({
-			chat_id: chatId,
+			chat_id: message.chat.id,
 			text: result.mediaEcho,
 			message_thread_id: message.message_thread_id,
 			disable_notification: true,
 		}).catch(() => {});
 	}
 
-	// Always use "followUp" for safety - if the agent is idle, it starts a new turn;
-	// if busy, it queues. No ctx.isIdle() check needed (avoids stale ctx issue).
 	pi.sendUserMessage(result.text, { deliverAs: "followUp" });
 
 	return { chatId: message.chat.id, messageId: message.message_id, unprocessed: result.unprocessed };
 }
 
-/** Format a Telegram message into content for pi.sendUserMessage(). */
+// ── Command handlers ─────────────────────────────────────────────────────────
+
+async function handleModelCommand(instance: Instance, api: TelegramApi, message: Message): Promise<void> {
+	const session = instance.getSessionByThread(message.message_thread_id)
+		?? (instance.lastActiveSessionId ? instance.sessions.get(instance.lastActiveSessionId) : undefined);
+	if (!session) {
+		await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} No active session.", reply_parameters: { message_id: message.message_id } });
+		return;
+	}
+	// Model command needs ctx — we don't have one in incoming, so use the notifier's bound ctx
+	const ctx = instance.notifier.getContext();
+	if (!ctx) {
+		await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} No active session context.", reply_parameters: { message_id: message.message_id } });
+		return;
+	}
+	try {
+		const lines: string[] = [];
+		if (ctx.model) {
+			lines.push(`Current: ${ctx.model.provider}/${ctx.model.id}`);
+			if (ctx.model.name !== ctx.model.id) lines.push(`  ${ctx.model.name}`);
+			if (ctx.model.input.length > 0) lines.push(`  Input: ${ctx.model.input.join(", ")}`);
+		}
+		const available = ctx.modelRegistry.getAvailable();
+		if (available.length > 0) {
+			lines.push("");
+			lines.push(`Available (${available.length}):`);
+			for (const m of available) {
+				const active = ctx.model && m.provider === ctx.model.provider && m.id === ctx.model.id ? " \u{2B50}" : "";
+				lines.push(`  ${m.provider}/${m.id}${active}`);
+			}
+		}
+		await api.sendMessage({
+			chat_id: message.chat.id,
+			text: lines.join("\n") || "No model info available",
+			reply_parameters: { message_id: message.message_id },
+		});
+	} catch {
+		await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} Session context is stale.", reply_parameters: { message_id: message.message_id } });
+	}
+}
+
+async function handleStopCommand(instance: Instance, api: TelegramApi, message: Message): Promise<void> {
+	const session = instance.getSessionByThread(message.message_thread_id)
+		?? (instance.lastActiveSessionId ? instance.sessions.get(instance.lastActiveSessionId) : undefined);
+	if (!session) {
+		await api.sendMessage({ chat_id: message.chat.id, text: "Command received, but no active session.", reply_parameters: { message_id: message.message_id } });
+		return;
+	}
+	const ctx = instance.notifier.getContext();
+	if (!ctx) {
+		await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} No active session context.", reply_parameters: { message_id: message.message_id } });
+		return;
+	}
+	try {
+		if (!ctx.isIdle()) {
+			ctx.abort();
+			await api.sendMessage({
+				chat_id: message.chat.id,
+				text: "\u{23F9} Aborted current turn.",
+				reply_parameters: { message_id: message.message_id },
+			});
+		} else {
+			await api.sendMessage({
+				chat_id: message.chat.id,
+				text: "No active turn to abort.",
+				reply_parameters: { message_id: message.message_id },
+			});
+		}
+	} catch {
+		await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} Session context is stale.", reply_parameters: { message_id: message.message_id } });
+	}
+}
+
+async function handleStatusCommand(instance: Instance, api: TelegramApi, message: Message): Promise<void> {
+	// Contextual: session topic → session info, General topic → instance info
+	const session = instance.getSessionByThread(message.message_thread_id);
+	if (session) {
+		const ctx = instance.notifier.getContext();
+		const lines = ctx ? session.statusInfo(ctx) : ["No session context available"];
+		await api.sendMessage({ chat_id: message.chat.id, text: lines.join("\n"), reply_parameters: { message_id: message.message_id } });
+	} else {
+		// Instance-level status
+		const lines = instance.statusInfo();
+		await api.sendMessage({ chat_id: message.chat.id, text: lines.join("\n"), reply_parameters: { message_id: message.message_id } });
+	}
+}
+
+async function handleCompactCommand(instance: Instance, api: TelegramApi, message: Message): Promise<void> {
+	const session = instance.getSessionByThread(message.message_thread_id)
+		?? (instance.lastActiveSessionId ? instance.sessions.get(instance.lastActiveSessionId) : undefined);
+	if (!session) {
+		await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} No active session.", reply_parameters: { message_id: message.message_id } });
+		return;
+	}
+	const ctx = instance.notifier.getContext();
+	if (!ctx) {
+		await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} No active session context.", reply_parameters: { message_id: message.message_id } });
+		return;
+	}
+	try {
+		if (!ctx.isIdle()) {
+			await api.sendMessage({
+				chat_id: message.chat.id,
+				text: "Cannot compact while busy. Send \"stop\" first.",
+				reply_parameters: { message_id: message.message_id },
+			});
+			return;
+		}
+		ctx.compact({
+			onComplete: () => {
+				void api.sendMessage({ chat_id: message.chat.id, text: "\u{2705} Compaction completed.", reply_parameters: { message_id: message.message_id } }).catch(() => {});
+			},
+			onError: (error: Error) => {
+				void api.sendMessage({ chat_id: message.chat.id, text: `\u{274C} Compaction failed: ${error.message}`, reply_parameters: { message_id: message.message_id } }).catch(() => {});
+			},
+		});
+		await api.sendMessage({ chat_id: message.chat.id, text: "\u{1F504} Compaction started\u{2026}", reply_parameters: { message_id: message.message_id } });
+	} catch {
+		await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} Session context is stale.", reply_parameters: { message_id: message.message_id } });
+	}
+}
+
+async function handleNewCommand(instance: Instance, api: TelegramApi, message: Message): Promise<void> {
+	if (!instance.pi) {
+		await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} No Pi API available.", reply_parameters: { message_id: message.message_id } });
+		return;
+	}
+	instance.setAutoConnectNext();
+	instance.pi.sendUserMessage("/new");
+	await api.sendMessage({ chat_id: message.chat.id, text: "\u{1F195} Starting new session\u{2026}", reply_parameters: { message_id: message.message_id } });
+}
+
+// ── Message formatting ───────────────────────────────────────────────────────
+
 async function formatMessageContent(
+	instance: Instance,
 	message: Message,
 	isEdit: boolean,
 	api: TelegramApi,
@@ -350,52 +377,41 @@ async function formatMessageContent(
 ): Promise<FormattedMessage | undefined> {
 	const unprocessed: MediaType[] = [];
 
-	// Text message - pass through directly
 	if (message.text) {
 		return { text: formatIncomingText(message.text, isEdit), unprocessed };
 	}
 
-	// Service messages - no content to forward
 	if (message.new_chat_members || message.left_chat_member || message.group_chat_created || message.supergroup_chat_created) {
 		return undefined;
 	}
 
-	// Data-only messages (no file download) - format as text
-	if (message.location) {
-		return { text: formatLocation(message.location), unprocessed };
-	}
-	if (message.venue) {
-		return { text: formatVenue(message.venue), unprocessed };
-	}
-	if (message.contact) {
-		return { text: formatContact(message.contact), unprocessed };
-	}
-	if (message.dice) {
-		return { text: formatDice(message.dice), unprocessed };
-	}
-	if (message.poll) {
-		return { text: formatPoll(message.poll), unprocessed };
-	}
+	// Data-only messages
+	if (message.location) return { text: formatLocation(message.location), unprocessed };
+	if (message.venue) return { text: formatVenue(message.venue), unprocessed };
+	if (message.contact) return { text: formatContact(message.contact), unprocessed };
+	if (message.dice) return { text: formatDice(message.dice), unprocessed };
+	if (message.poll) return { text: formatPoll(message.poll), unprocessed };
 
-	// Media messages - download and process via configured handler
+	// Media messages
 	const mediaInfo = getMediaInfo(message);
 	if (mediaInfo) {
 		const processor = config.media?.[mediaInfo.type];
-		const caption = message.caption ? `\nCaption: ${message.caption}` : "";
+		log.debug({ mediaType: mediaInfo.type, processorApi: processor?.api, processorUrl: processor?.url ?? processor?.command }, "media: processor resolved");
 		const emoji = mediaEmoji(mediaInfo.type);
+		const caption = message.caption || undefined;
 		let localPath: string | undefined;
 
 		try {
-			// Per-session media directory (avoids cross-talk when multiple
-			// pi instances share the same CWD).
-			const sess = currentSession();
-			const sessionFile = sess?.sessionFile;
-			const sessionDir = sess?.ctx ? sess.ctx.sessionManager.getSessionDir() : undefined;
+			const session = instance.lastActiveSessionId ? instance.sessions.get(instance.lastActiveSessionId) : undefined;
+			const sessionFile = session?.sessionFile;
+			const ctx = instance.notifier.getContext();
+			const sessionDir = ctx ? ctx.sessionManager.getSessionDir() : undefined;
 			if (!sessionDir) {
-				// No active session - can't download media files
-				return { text: formatIncomingText(`${emoji} [Session not available - cannot download file]${caption}`, isEdit), unprocessed };
+				log.warn({ mediaType: mediaInfo.type, fileId: mediaInfo.fileId }, "media: no session dir");
+				return { text: formatIncomingText(formatMediaForAgent(mediaInfo.type, "[Session not available - cannot download file]", undefined, undefined), isEdit), unprocessed };
 			}
 			const mediaDir = await getMediaDir(sessionFile, sessionDir);
+			log.debug({ mediaType: mediaInfo.type, fileId: mediaInfo.fileId, hasProcessor: !!processor }, "media: downloading");
 			localPath = await downloadMediaFile(
 				api,
 				mediaInfo.fileId,
@@ -408,60 +424,44 @@ async function formatMessageContent(
 			);
 
 			if (!processor) {
-				// No processor configured - file path + hint
 				unprocessed.push(mediaInfo.type);
-				return { text: formatIncomingText(mediaPlaceholder(mediaInfo.type, message, localPath) + caption, isEdit), unprocessed };
+				return { text: formatIncomingText(formatMediaForAgent(mediaInfo.type, mediaNoProcessorHint(mediaInfo.type), localPath, caption), isEdit), unprocessed };
 			}
 
-			// Show processing indicator in status bar (best-effort via session ctx)
-			const ctx = safeCtx(currentSession()?.ctx);
-			if (ctx) {
-				try {
-					const theme = ctx.ui.theme;
-					const label = theme.fg("accent", "tg");
-					ctx.ui.setStatus("telegram", `${label} ${emoji} processing ${mediaLabel(mediaInfo.type)}\u{2026}`);
-				} catch { /* stale ctx - skip status update */ }
-			}
+			// Show processing indicator
 
 			const processed = await processMedia(processor, localPath);
 			const truncated = await truncateProcessorOutput(processed, localPath);
 
-			// Clear processing indicator (best-effort)
-			if (ctx) {
-				try { ctx.ui.setStatus("telegram", undefined); } catch { /* stale */ }
-			}
+			// Restore status bar (clears processing indicator)
 
-			// Consistent layout: emoji + filepath, then processor output on next line
-			// Include media echo for visible feedback in the Telegram chat
 			const echoPreview = truncated.length > 800 ? truncated.slice(0, 800) + "\u{2026}" : truncated;
-			const mediaEcho = `${emoji} ${echoPreview}`;
-			return { text: formatIncomingText(`${emoji} ${localPath}\n\n${truncated}${caption}`, isEdit), unprocessed, mediaEcho };
+			const mediaEcho = `${emoji} ${caption ? `[${caption}] ` : ""}${echoPreview}`;
+			return { text: formatIncomingText(formatMediaForAgent(mediaInfo.type, truncated, localPath, caption), isEdit), unprocessed, mediaEcho };
 		} catch (err) {
-			// Clear processing indicator on error too (best-effort)
-			const ctx = safeCtx(currentSession()?.ctx);
-			if (ctx) {
-				try { ctx.ui.setStatus("telegram", undefined); } catch { /* stale */ }
-			}
-			const msg = err instanceof Error ? err.message : String(err);
-			const pathInfo = localPath ? `${emoji} ${localPath}\n` : `${emoji} `;
-			return { text: formatIncomingText(`${pathInfo}[Processing failed: ${msg}]${caption}`, isEdit), unprocessed };
+			const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+			log.warn({ mediaType: mediaInfo.type, fileId: mediaInfo.fileId, localPath, err: msg, stack: err instanceof Error ? err.stack : undefined }, "media: processing failed");
+			return { text: formatIncomingText(formatMediaForAgent(mediaInfo.type, `[Processing failed: ${msg}]`, localPath, undefined), isEdit), unprocessed };
 		}
 	}
 
-	// Fallback: send caption if media has one
 	if (message.caption) {
 		return { text: formatIncomingText(message.caption, isEdit), unprocessed };
 	}
 
-	// Unknown message type
 	return { text: formatIncomingText("[unsupported message type]", isEdit), unprocessed };
 }
 
-/** Handle chat member update (bot added/removed). */
-async function handleChatMemberUpdate(update: ChatMemberUpdated): Promise<void> {
-	if (update.new_chat_member.status === "kicked" || update.new_chat_member.status === "left") {
-		if (state.activeChatId === update.chat.id) {
-			unlockChat();
+// ── Chat member update ───────────────────────────────────────────────────────
+
+async function handleChatMemberUpdate(instance: Instance, update: ChatMemberUpdated): Promise<void> {
+	const newStatus = update.new_chat_member.status;
+	const oldStatus = update.old_chat_member?.status;
+	log.info({ oldStatus, newStatus, userId: update.new_chat_member.user.id }, "my_chat_member");
+	if (newStatus === "kicked" || newStatus === "left") {
+		if (instance.pairedChatId === update.chat.id) {
+			log.info("unlocking chat");
+			instance.unlockChat();
 		}
 	}
 }
@@ -469,49 +469,56 @@ async function handleChatMemberUpdate(update: ChatMemberUpdated): Promise<void> 
 // ── Routing ──────────────────────────────────────────────────────────────────
 
 /** Route an incoming message to the correct session's outgoing handler.
- *  For General topic messages, echoes into the session thread and adds a
- *  reaction on the original to signal routing.
- *  Returns the echo message ID (if echoed), or undefined. */
-async function routeToSession(msg: Message | undefined, chatId: number): Promise<number | undefined> {
-	if (!msg || !state.api) return undefined;
+ *  For General topic messages, echo into the active session's thread. */
+async function routeToSession(instance: Instance, msg: Message | undefined, chatId: number): Promise<number | undefined> {
+	if (!msg || !instance.api) return undefined;
 
-	const handle = state.registry.getByThread(msg.message_thread_id);
+	const session = instance.getSessionByThread(msg.message_thread_id);
 	const isGeneralTopic = !msg.message_thread_id;
 
-	if (handle) {
-		state.registry.setActive(handle.sessionId);
+	if (session) {
+		// Routed by thread — update lastActiveSessionId
+		log.debug({ threadId: msg.message_thread_id }, "route: thread match");
+		instance.lastActiveSessionId = session.sessionId;
 		return undefined;
-	} else if (isGeneralTopic && state.api && state.topicsEnabled) {
-		// Message in General topic - route to current session and echo into the thread
-		const activeHandle = state.registry.getActive();
-		if (!activeHandle) return undefined;
+	} else if (isGeneralTopic && instance.api && instance.topicsEnabled) {
+		// General topic — route to last active session
+		const activeSession = instance.lastActiveSessionId
+			? instance.sessions.get(instance.lastActiveSessionId)
+			: undefined;
 
-		state.registry.setActive(activeHandle.sessionId);
+		if (!activeSession || !activeSession.outgoing) {
+			log.debug("route: General topic, no active session");
+			// No active session — reply in General topic instead of silently dropping
+			try {
+				await instance.api.sendMessage({
+					chat_id: chatId,
+					text: "No active session \u{2014} open a session topic or start one with /new",
+				});
+			} catch { /* non-critical */ }
+			return undefined;
+		}
 
-		const outgoing = activeHandle.outgoing;
-		if (!outgoing) return undefined;
+		instance.lastActiveSessionId = activeSession.sessionId;
 
-		// Get text from the General-topic message for echoing
+		// Echo the message into the session's thread
 		const text = extractText(msg);
 		if (!text) {
-			// Media-only message - send a generic echo so the reply chain is in the right thread
+			// Media-only message — send a generic echo
 			const types = detectContentTypes(msg);
 			const label = types.length > 0 ? types[0] : "message";
 			try {
-				const echoMsg = await state.api.sendMessage({
+				const echoMsg = await instance.api.sendMessage({
 					chat_id: chatId,
 					text: `\u{1F464} [${label}]`,
-					message_thread_id: outgoing.getThreadId(),
+					message_thread_id: activeSession.outgoing.getThreadId(),
 					disable_notification: true,
 				});
-
-				// React to the General-topic message to signal routing
-				void state.api.setMessageReaction({
+				void instance.api.setMessageReaction({
 					chat_id: chatId,
 					message_id: msg.message_id,
 					reaction: [{ type: "emoji", emoji: "\u{1F440}" }],
-				}).catch(() => { /* non-critical */ });
-
+				}).catch(() => {});
 				return echoMsg.message_id;
 			} catch {
 				return undefined;
@@ -519,41 +526,39 @@ async function routeToSession(msg: Message | undefined, chatId: number): Promise
 		}
 
 		try {
-			const echoMsg = await state.api.sendMessage({
+			const echoMsg = await instance.api.sendMessage({
 				chat_id: chatId,
 				text: `\u{1F464} ${text}`,
-				message_thread_id: outgoing.getThreadId(),
+				message_thread_id: activeSession.outgoing.getThreadId(),
 				disable_notification: true,
 			});
-
-			// React to the General-topic message to signal routing (silent, no text clutter)
-			void state.api.setMessageReaction({
+			void instance.api.setMessageReaction({
 				chat_id: chatId,
 				message_id: msg.message_id,
 				reaction: [{ type: "emoji", emoji: "\u{1F440}" }],
-			}).catch(() => { /* non-critical */ });
-
+			}).catch(() => {});
 			return echoMsg.message_id;
 		} catch {
-			// Non-critical - echo is best-effort
 			return undefined;
 		}
 	}
+	log.debug({ threadId: msg.message_thread_id, isGeneralTopic }, "route: unroutable");
 	return undefined;
 }
 
 // ── Tracking ─────────────────────────────────────────────────────────────────
 
-/** Set reaction on user message and track it for completion reaction. */
-function trackUserMessage(chatId: number, messageId: number): void {
-	const outgoing = state.registry.getActive()?.outgoing;
-	if (outgoing) {
-		void outgoing.setReaction(chatId, messageId, "\u{23F3}").catch(() => {});
-		outgoing.setLastUserMessage(chatId, messageId);
+function trackUserMessage(instance: Instance, msg: Message | undefined, messageId: number): void {
+	if (!msg) return;
+	const session = instance.getSessionByThread(msg.message_thread_id)
+		?? (instance.lastActiveSessionId ? instance.sessions.get(instance.lastActiveSessionId) : undefined);
+	if (session?.outgoing) {
+		void session.outgoing.setReaction(instance.pairedChatId ?? msg.chat.id, messageId, "\u{1F914}").catch(() => {});
+		session.outgoing.setLastUserMessage(instance.pairedChatId ?? msg.chat.id, messageId);
 	}
 }
 
-// ── Help / Status Messages ───────────────────────────────────────────────────
+// ── Help ─────────────────────────────────────────────────────────────────────
 
 async function sendHelpMessage(api: TelegramApi, chatId: number, replyToId?: number): Promise<void> {
 	await api.sendMessage({
@@ -561,26 +566,4 @@ async function sendHelpMessage(api: TelegramApi, chatId: number, replyToId?: num
 		text: "Send me a message and I'll forward it to Pi! Commands:\n/status - show Pi status\n/model - show or switch model\n/compact - compact the session\n/stop - abort current turn",
 		reply_parameters: replyToId ? { message_id: replyToId } : undefined,
 	});
-}
-
-async function sendStatusMessage(api: TelegramApi, chatId: number, ctx: import("@earendil-works/pi-coding-agent").ExtensionContext | undefined, replyToId?: number): Promise<void> {
-	const lines: string[] = [];
-	if (ctx) {
-		try {
-			if (ctx.model) {
-				lines.push(`Model: ${ctx.model.provider}/${ctx.model.id}`);
-			}
-			const usage = ctx.getContextUsage();
-			if (usage) {
-				const pct = usage.percent !== null ? `${usage.percent.toFixed(1)}%` : "?";
-				lines.push(`Context: ${pct}/${usage.contextWindow}`);
-			}
-			lines.push(`Idle: ${ctx.isIdle() ? "yes" : "no"}`);
-		} catch {
-			lines.push("Session context is stale");
-		}
-	} else {
-		lines.push("No session context available");
-	}
-	await api.sendMessage({ chat_id: chatId, text: lines.join("\n"), reply_parameters: replyToId ? { message_id: replyToId } : undefined });
 }

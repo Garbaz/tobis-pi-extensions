@@ -41,7 +41,7 @@ Full Telegram ↔ Pi bridge with forum topics, media processing, multi-instance 
 3. In Pi, run `/telegram setup` and paste the token.
 4. Run `/telegram connect` to start polling.
 
-On first message, the sender is auto-paired as the allowed user. Other users get a "waiting for authorization" prompt; approve them with `/telegram allow` or block with `/telegram block`.
+On first message, the sender is auto-paired as the allowed user. Other users get a "waiting for authorization" prompt; an interactive dialog appears in the Pi TUI where you can accept or deny them.
 
 ### Commands (in Pi TUI)
 
@@ -51,9 +51,7 @@ On first message, the sender is auto-paired as the allowed user. Other users get
 | `/telegram connect` | Start polling and bridge to Telegram |
 | `/telegram disconnect` | Stop polling (preserves topic data for reconnect) |
 | `/telegram status` | Show connection state, paired user, whitelist/blacklist |
-| `/telegram topics` | Toggle forum topics on/off (reconnect to apply) |
-| `/telegram allow [ID]` | Approve a pending user (or first pending if no ID) |
-| `/telegram block [ID]` | Block a user (or first pending if no ID) |
+| `/telegram topics` | Toggle forum topics on/off |
 | `/telegram` | Interactive menu with all subcommands |
 
 ### Bot Commands (in Telegram chat)

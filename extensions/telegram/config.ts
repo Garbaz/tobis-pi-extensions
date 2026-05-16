@@ -13,8 +13,10 @@
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import type { TelegramConfig, MediaProcessor, MediaType } from "./types.js";
-import { checkConfig, applyDefaults, validateConfig as schemaValidate } from "./schema.js";
+import { checkConfig, applyDefaults, validateConfig as schemaValidate, configSchema } from "./schema.js";
 import { CONFIG_DIR, CONFIG_PATH, STATE_PATH, ensureRunDir } from "./paths.js";
+import { createLogger } from "./log.js";
+const log = createLogger("config");
 
 const DEFAULT_CONFIG: TelegramConfig = {
 	botToken: undefined,
@@ -85,9 +87,17 @@ export async function readConfig(): Promise<TelegramConfig> {
 	// Validate against schema and collect warnings
 	const errors = schemaValidate(withDefaults);
 	if (errors.length > 0) {
-		// Log warnings to stderr - config still loads with best-effort
-		for (const err of errors) {
-			process.stderr.write(`[telegram] config warning: ${err}\n`);
+		// Check for additional properties and include the key names
+		const allowedKeys = new Set(Object.keys((configSchema as { properties?: Record<string, unknown> }).properties ?? {}));
+		const extraKeys = Object.keys(withDefaults).filter((k) => !allowedKeys.has(k) && !k.startsWith('$'));
+		if (extraKeys.length > 0) {
+			log.warn({ extraKeys }, "config: unknown keys will be ignored");
+			for (const key of extraKeys) {
+				delete withDefaults[key];
+			}
+		}
+		for (const err of errors.filter((e) => !e.includes("additional properties"))) {
+			log.warn({ error: err }, "config: validation warning");
 		}
 	}
 

@@ -1,245 +1,295 @@
-// ── Session Topic Setup ──────────────────────────────────────────────────────
-// Creates or resumes a forum topic for the current Pi session.
-// Topics are named from CWD basename on creation, then renamed to
-// "basename · snippet" on the first incoming user message.
+// ── Session ──────────────────────────────────────────────────────────────────
+// Per-Pi-session state and topic lifecycle.
+// Constructed by Instance.registerSession. Receives an Instance reference
+// at construction for calling instance.subscribeThread/unsubscribeThread.
+//
+// No ctx field. Methods that need ctx take it as a parameter.
+// Replaces the old session.ts functions + SessionHandle from session-registry.ts.
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Instance } from "./instance.js";
 import { OutgoingHandler } from "./outgoing.js";
-import { readSessionData, saveSessionFields, createForumTopic, reopenForumTopic, closeForumTopic, renameForumTopic, hideGeneralTopic } from "./topics.js";
-import { state, currentSession, activateSession, getActiveChatId, notify, subscribeThread, unsubscribeThread } from "./state.js";
-import { createLogger } from "./log.js";
+import { readSessionData, saveSessionFields } from "./session-data.js";
+import { createForumTopic, reopenForumTopic, closeForumTopic, renameForumTopic, hideGeneralTopic } from "./topic-api.js";
+import { createLogger, runWithContext, withContext } from "./log.js";
 const log = createLogger("session");
 
-// ── Topic Icon Colors ─────────────────────────────────────────────────────────
-// The 6 allowed icon colors for forum topics (from Bot API docs).
-const TOPIC_ICON_COLORS = [
-	0x6FB9F0, // blue
-	0xFFD67E, // yellow
-	0xCB86DB, // purple
-	0x8EEE98, // green
-	0xFF93B2, // pink
-	0xFB6F5F, // red
-];
+// ── Session Start Reason ─────────────────────────────────────────────────────
 
-// ── Topic Naming ──────────────────────────────────────────────────────────────
-
-/** Derive a topic name from the CWD basename. */
-function cwdBasename(): string {
-	const cwd = process.cwd();
-	const name = cwd.split("/").pop() || "session";
-	log.debug({ cwd, name }, "cwdBasename");
-	return name;
-}
-
-/** Derive a topic name from CWD + first message snippet.
- *  Format: "basename · snippet" (max 128 chars for Telegram). */
-export function topicNameFromMessage(text: string): string {
-	const basename = cwdBasename();
-	// Take first line, strip leading / commands, trim whitespace
-	const firstLine = text.split("\n")[0]?.trim() || "";
-	const snippet = firstLine.replace(/^\/\S+\s*/, "").slice(0, 60).trim();
-	log.debug({ snippet }, "topicNameFromMessage");
-	if (!snippet) return basename;
-	const name = `${basename} \u00B7 ${snippet}`;
-	return name.slice(0, 128);
-}
-
-// ── Session Start Reason ──────────────────────────────────────────────────────
-
-/** Why the session started. Matches Pi's SessionStartEvent.reason. */
 export type SessionStartReason = "startup" | "reload" | "new" | "resume" | "fork";
 
-/** Result of setting up a session topic. */
+// ── Topic Setup Result ───────────────────────────────────────────────────────
+
 export interface TopicSetupResult {
-	/** What happened during setup: "created", "resumed", or "skipped". */
 	action: "created" | "resumed" | "skipped";
-	/** The topic name (label) used. */
 	topicName?: string;
 }
 
-// ── Session Registration ─────────────────────────────────────────────────────
-// Creates a forum topic and sets up the session handle's outgoing handler.
-// Thread↔session mapping is registered in SessionRegistry.
+// ── Topic Icon Colors ────────────────────────────────────────────────────────
 
-/** Register a session with a new forum topic.
- *  Creates the topic via the Telegram API, sets up the outgoing handler,
- *  and registers the thread↔session mapping in the registry.
- *  Returns the thread ID, or undefined if topics are disabled. */
-async function registerSession(sessionId: string, sessionName: string, signal?: AbortSignal, iconColor?: number): Promise<number | undefined> {
-	const api = state.api;
-	const chatId = getActiveChatId();
-	if (!api || !chatId) return undefined;
+const TOPIC_ICON_COLORS = [
+	0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F,
+];
 
-	const result = await createForumTopic(api, chatId, sessionName, signal, iconColor);
-	if (!result) return undefined;
-	if (result.topicsShouldDisable) {
-		state.topicsEnabled = false;
-		return undefined;
+// ── Session ──────────────────────────────────────────────────────────────────
+
+export class Session {
+	readonly sessionId: string;
+	sessionFile: string | undefined;
+
+	/** Forum topic thread ID. Set when topic is created/restored. */
+	threadId: number | undefined;
+
+	/** Forum topic name. Set when topic is created or renamed. */
+	topicName: string | undefined;
+
+	/** Whether the topic has been renamed from CWD basename to "basename · snippet".
+	 *  Kept in sync with session data's topicRenamed field. */
+	topicRenamed: boolean = false;
+
+	/** Per-session outgoing message handler. Set during topic setup. */
+	outgoing: OutgoingHandler | undefined;
+
+	/** The instance this session belongs to. */
+	private readonly instance: Instance;
+
+	constructor(sessionId: string, sessionFile: string | undefined, instance: Instance) {
+		this.sessionId = sessionId;
+		this.sessionFile = sessionFile;
+		this.instance = instance;
 	}
 
-	const threadId = result.threadId;
-	const handle = state.registry.get(sessionId);
-	if (handle) {
-		const outgoing = new OutgoingHandler(api);
-		outgoing.setActiveChatId(chatId);
-		outgoing.setThreadId(threadId);
-		handle.outgoing = outgoing;
-	}
-	state.registry.setThread(sessionId, threadId, sessionName);
-	return threadId;
-}
+	// ── Topic lifecycle ───────────────────────────────────────────────────
 
-/** Restore a session's existing forum topic (e.g., on reload/resume).
- *  Reopens the topic and configures the outgoing handler.
- *  Returns the thread ID, or undefined if topics are disabled. */
-async function restoreSession(sessionId: string, threadId: number, name: string, signal?: AbortSignal): Promise<number | undefined> {
-	const api = state.api;
-	const chatId = getActiveChatId();
-	if (!api || !chatId) return undefined;
+	/** Create or resume a forum topic for this session.
+	 *  Called from session_start and /telegram connect.
+	 *
+	 *  - On "resume" or "reload": resumes the existing topic from session data.
+	 *  - On "new", "startup", or "fork": creates a fresh topic with CWD basename.
+	 *  - First incoming message renames the topic to "basename · snippet".
+	 *  - Writes session data so the session auto-connects on resume.
+	 *  - Subscribes to the thread via relay. */
+	async setupTopic(ctx: ExtensionContext, reason?: SessionStartReason): Promise<TopicSetupResult> {
+		const api = this.instance.api;
+		const chatId = this.instance.pairedChatId;
+		const config = this.instance.config;
 
-	const shouldDisable = await reopenForumTopic(api, chatId, threadId, signal);
-	if (shouldDisable) {
-		state.topicsEnabled = false;
-		// Topic is still registered even if reopen failed - messages may still work
-	}
+		log.debug({ hasApi: !!api, reason }, "setupTopic");
 
-	const handle = state.registry.get(sessionId);
-	if (handle) {
-		const outgoing = new OutgoingHandler(api);
-		outgoing.setActiveChatId(chatId);
-		outgoing.setThreadId(threadId);
-		handle.outgoing = outgoing;
-	}
-	state.registry.setThread(sessionId, threadId, name);
-	return threadId;
-}
+		if (!api || !chatId || !config.allowedUserId) return { action: "skipped" };
 
-/** Unregister a session - close its forum topic.
- *  Session handle is removed from registry by the caller (index.ts session_shutdown). */
-async function unregisterSession(sessionId: string, threadId: number | undefined, signal?: AbortSignal): Promise<void> {
-	const api = state.api;
-	const chatId = getActiveChatId();
-	if (!api || !chatId || threadId === undefined) return;
+		const label = cwdBasename();
+		log.debug({ label, topicsEnabled: this.instance.topicsEnabled, topicRenamed: this.topicRenamed }, "setupTopic: proceed");
 
-	await closeForumTopic(api, chatId, threadId, signal);
-}
+		// Only resume existing topic on resume/reload — never on new/startup/fork
+		const canResume = reason === "resume" || reason === "reload";
 
-// ── Session Topic Setup ──────────────────────────────────────────────────────
+		const sessionData = await readSessionData(this.sessionFile);
+		log.debug({ canResume, hasSessionData: !!sessionData, sessionThreadId: sessionData?.threadId }, "setupTopic: resume check");
 
-/** Creates or resumes a forum topic for the current session.
- *  Called from session_start and /telegram connect.
- *
- *  - On "resume" or "reload": resumes the existing topic from session data.
- *  - On "new", "startup", or "fork": creates a fresh topic with CWD basename.
- *  - First incoming message renames the topic to "basename · snippet".
- *  - Writes session data so the session auto-connects on resume.
- *  - Subscribes to the thread via relay client if applicable. */
-export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionStartReason): Promise<TopicSetupResult> {
-	const sess = currentSession();
-	const api = state.api;
-	const chatId = getActiveChatId();
-	log.debug({ hasSession: !!sess, hasApi: !!api, chatId, allowedUserId: state.config.allowedUserId, reason }, "setupSessionTopic");
-	if (!sess || !api || !chatId || !state.config.allowedUserId) return { action: "skipped" };
-
-	const label = cwdBasename();
-	log.debug({ sessionId: sess.sessionId.slice(0, 8), label, topicsEnabled: state.topicsEnabled, topicRenamed: sess.topicRenamed }, "setupSessionTopic: init");
-
-	// Only resume existing topic on resume/reload - never on new/startup/fork
-	const canResume = reason === "resume" || reason === "reload";
-
-	// Check for existing session data (resume vs create)
-	const sessionData = await readSessionData(sess.sessionFile);
-	log.debug({ canResume, hasSessionData: !!sessionData, threadId: sessionData?.threadId }, "setupSessionTopic: resume check");
-	if (canResume && sessionData?.threadId) {
-		// Resume existing topic
-		const threadId = await restoreSession(
-			sess.sessionId,
-			sessionData.threadId,
-			sessionData.topicName ?? label,
-		);
-		log.debug({ threadId }, "setupSessionTopic: restored");
-		if (threadId !== undefined) {
-			// If already renamed in a previous session, mark as renamed
-			if (sessionData.topicName && sessionData.topicName.includes("\u00B7")) {
-				sess.topicRenamed = true;
-				log.debug("setupSessionTopic: topic already renamed");
+		if (canResume && sessionData?.threadId) {
+			// Resume existing topic
+			const threadId = await this.restoreTopic(sessionData.threadId, sessionData.topicName ?? label);
+			if (threadId !== undefined) {
+				// restoreTopic set this.threadId via setSessionThread — update ALS
+				return runWithContext(withContext({ threadId: this.threadId! }), () => {
+					log.debug("setupTopic: restored");
+					if (sessionData.topicRenamed) {
+						this.topicRenamed = true;
+						log.debug("setupTopic: already renamed");
+					}
+					return { action: "resumed" as const, topicName: sessionData.topicName ?? label };
+				});
 			}
-			return { action: "resumed", topicName: sessionData.topicName ?? label };
+		} else if (this.instance.topicsEnabled) {
+			// Create the topic immediately so it's ready for messages
+			const iconColor = TOPIC_ICON_COLORS[Math.floor(Math.random() * TOPIC_ICON_COLORS.length)];
+			log.debug({ label }, "setupTopic: creating");
+			const threadId = await this.createTopic(label, undefined, iconColor);
+			if (threadId !== undefined) {
+				// createTopic set this.threadId via setSessionThread — update ALS
+				return await runWithContext(withContext({ threadId: this.threadId! }), async () => {
+					log.debug("setupTopic: created");
+					await saveSessionFields(this.sessionFile, { connected: true, threadId, topicName: label });
+					// Hide the General topic
+					await hideGeneralTopic(api, chatId);
+					return { action: "created" as const, topicName: label };
+				});
+			}
+			log.debug("setupTopic: created (no threadId)");
 		}
-	} else if (state.topicsEnabled) {
-		// Create the topic immediately so it's ready for messages.
-		const iconColor = TOPIC_ICON_COLORS[Math.floor(Math.random() * TOPIC_ICON_COLORS.length)];
-		log.debug({ label, sessionId: sess.sessionId.slice(0, 8) }, "setupSessionTopic: creating topic");
-		const threadId = await registerSession(sess.sessionId, label, undefined, iconColor);
-		log.debug({ threadId }, "setupSessionTopic: registered");
-		let created = false;
-		if (threadId !== undefined) {
-			activateSession(sess.sessionId);
-			await saveSessionFields(sess.sessionFile, { connected: true, threadId, topicName: label });
-			created = true;
-		}
-		// Hide the General topic - it's confusing when sessions have dedicated topics
-		await hideGeneralTopic(api, chatId);
 
-		if (created) {
-			return { action: "created", topicName: label };
+		// Mark connected in session data
+		if (!canResume || !sessionData) {
+			await saveSessionFields(this.sessionFile, { connected: true });
+		}
+
+		// Subscribe to this thread via the relay
+		const sessionDataAfter = await readSessionData(this.sessionFile);
+		if (sessionDataAfter?.threadId) {
+			this.instance.subscribeThread(sessionDataAfter.threadId, this.sessionId);
+		}
+
+		return { action: "skipped" };
+	}
+
+	/** Capture the first user message text for topic renaming.
+	 *  Writes firstMessageSnippet into session data if not already set.
+	 *  If topic exists and not yet renamed, applies the rename. */
+	async captureFirstMessage(text: string): Promise<void> {
+		// Skip commands
+		const firstLine = text.split("\n")[0]?.trim() || "";
+		if (firstLine.startsWith("/")) return;
+
+		const snippet = firstLine.slice(0, 60).trim();
+		if (!snippet) return;
+
+		// Save snippet to session data if not already set
+		const sessionData = await readSessionData(this.sessionFile);
+		if (!sessionData?.firstMessageSnippet) {
+			await saveSessionFields(this.sessionFile, { firstMessageSnippet: snippet });
+		}
+
+		// Apply rename if topic exists and not yet renamed
+		if (this.threadId !== undefined && !this.topicRenamed) {
+			await this.applyTopicRename();
 		}
 	}
 
-	// Mark this session as telegram-connected.
-	// On new/startup/fork, always write fresh (may overwrite stale data from a previous session).
-	// On resume/reload, only write if no session data exists yet.
-	if (!canResume || !sessionData) {
-		await saveSessionFields(sess.sessionFile, { connected: true });
+	/** Apply the topic rename from session data's firstMessageSnippet.
+	 *  Called when both the snippet and the thread are available. */
+	async applyTopicRename(): Promise<void> {
+		if (this.topicRenamed) return;
+
+		const api = this.instance.api;
+		const chatId = this.instance.pairedChatId;
+		if (!api || !chatId || this.threadId === undefined) return;
+
+		const sessionData = await readSessionData(this.sessionFile);
+		const snippet = sessionData?.firstMessageSnippet;
+		if (!snippet) return;
+
+		const name = topicNameFromMessage(snippet);
+		log.debug({ name }, "applyTopicRename");
+
+		this.topicRenamed = true;
+		await saveSessionFields(this.sessionFile, { topicRenamed: true });
+
+		await renameForumTopic(api, chatId, this.threadId, name);
+
+		this.topicName = name;
+		await saveSessionFields(this.sessionFile, { topicName: name });
+		log.debug({ topicName: name }, "applyTopicRename: done");
 	}
 
-	// Subscribe to this thread via the relay (local or client)
-	const sessionDataAfter = await readSessionData(sess.sessionFile);
-	if (sessionDataAfter?.threadId) {
-		subscribeThread(sessionDataAfter.threadId, sess.sessionId);
+	/** Tear down this session's Telegram state.
+	 *  - On "reload": unsubscribe relay but do NOT close the topic (transparent reload).
+	 *  - On all other reasons (new/quit/fork): close topic and unsubscribe. */
+	async teardown(reason: string): Promise<void> {
+		if (this.threadId !== undefined) {
+			this.instance.unsubscribeThread(this.threadId);
+		}
+
+		if (reason !== "reload") {
+			await this.closeTopic();
+		}
 	}
 
-	return { action: "skipped" };
+	/** Mark this session as disconnected in session data.
+	 *  Keeps threadId/topicName for reconnect resume. */
+	async markDisconnected(): Promise<void> {
+		await saveSessionFields(this.sessionFile, { connected: false });
+	}
+
+	/** Status info for the /status command (Session-level, shown in session topic). */
+	statusInfo(ctx: ExtensionContext): string[] {
+		const lines: string[] = [];
+		try {
+			if (ctx.model) {
+				lines.push(`Model: ${ctx.model.provider}/${ctx.model.id}`);
+			}
+			const usage = ctx.getContextUsage();
+			if (usage) {
+				const pct = usage.percent !== null ? `${usage.percent.toFixed(1)}%` : "?";
+				lines.push(`Context: ${pct}/${usage.contextWindow}`);
+			}
+			lines.push(`Idle: ${ctx.isIdle() ? "yes" : "no"}`);
+		} catch {
+			lines.push("Session context is stale");
+		}
+		if (this.topicName) {
+			lines.push(`Topic: ${this.topicName}`);
+		}
+		lines.push(`Session: ${this.sessionId.slice(0, 8)}`);
+		return lines;
+	}
+
+	// ── Internal helpers ──────────────────────────────────────────────────
+
+	/** Create a new forum topic and set up the outgoing handler. */
+	private async createTopic(name: string, signal?: AbortSignal, iconColor?: number): Promise<number | undefined> {
+		const api = this.instance.api;
+		const chatId = this.instance.pairedChatId;
+		if (!api || !chatId) return undefined;
+
+		const result = await createForumTopic(api, chatId, name, signal, iconColor);
+		if (!result) return undefined;
+		if (result.topicsShouldDisable) {
+			this.instance.topicsEnabled = false;
+			return undefined;
+		}
+
+		const threadId = result.threadId;
+		const outgoing = new OutgoingHandler(api);
+		outgoing.setActiveChatId(chatId);
+		outgoing.setThreadId(threadId);
+		this.outgoing = outgoing;
+
+		this.instance.setSessionThread(this.sessionId, threadId, name);
+		return threadId;
+	}
+
+	/** Restore an existing forum topic and set up the outgoing handler. */
+	private async restoreTopic(threadId: number, name: string, signal?: AbortSignal): Promise<number | undefined> {
+		const api = this.instance.api;
+		const chatId = this.instance.pairedChatId;
+		if (!api || !chatId) return undefined;
+
+		const shouldDisable = await reopenForumTopic(api, chatId, threadId, signal);
+		if (shouldDisable) {
+			this.instance.topicsEnabled = false;
+		}
+
+		const outgoing = new OutgoingHandler(api);
+		outgoing.setActiveChatId(chatId);
+		outgoing.setThreadId(threadId);
+		this.outgoing = outgoing;
+
+		this.instance.setSessionThread(this.sessionId, threadId, name);
+		return threadId;
+	}
+
+	/** Close the forum topic for this session. */
+	private async closeTopic(): Promise<void> {
+		const api = this.instance.api;
+		const chatId = this.instance.pairedChatId;
+		if (!api || !chatId || this.threadId === undefined) return;
+		await closeForumTopic(api, chatId, this.threadId);
+	}
 }
 
-/** Rename the session's topic on first user message.
- *  Format: "basename · snippet". Only renames once (flag in SessionHandle).
- *  Skipped if topic was already renamed in a previous session (resumed). */
-export async function renameTopicFromMessage(text: string): Promise<void> {
-	const sess = currentSession();
-	const api = state.api;
-	const chatId = getActiveChatId();
-	log.debug({ hasSession: !!sess, topicRenamed: sess?.topicRenamed, hasApi: !!api, chatId }, "renameTopicFromMessage");
-	if (!sess || sess.topicRenamed || !api || !chatId) return;
+// ── Pure helpers ─────────────────────────────────────────────────────────────
 
-	const threadId = sess.threadId;
-	if (threadId === undefined) return;
-
-	const name = topicNameFromMessage(text);
-	log.debug({ sessionId: sess.sessionId.slice(0, 8), threadId, name }, "renameTopicFromMessage: renaming");
-	sess.topicRenamed = true;
-
-	await renameForumTopic(api, chatId, threadId, name);
-	log.debug("renameTopicFromMessage: done");
-
-	// Update the topic name in the registry and session data
-	sess.topicName = name;
-	await saveSessionFields(sess.sessionFile, { connected: true, threadId, topicName: name });
-	log.debug({ topicName: name }, "renameTopicFromMessage: saved");
+function cwdBasename(): string {
+	const cwd = process.cwd();
+	return cwd.split("/").pop() || "session";
 }
 
-/** Tear down the current session's Telegram state.
- *  Closes the forum topic, unsubscribes from relay, and removes session from the map.
- *  Called from session_shutdown - only polling stops on "quit" (handled by caller). */
-export async function teardownSession(sessionId: string): Promise<void> {
-	const handle = state.registry.get(sessionId);
-	const threadId = handle?.threadId;
-
-	// Unsubscribe from relay (local or client)
-	if (threadId !== undefined) {
-		unsubscribeThread(threadId);
-	}
-
-	// Close the forum topic
-	await unregisterSession(sessionId, threadId);
+function topicNameFromMessage(text: string): string {
+	const basename = cwdBasename();
+	const firstLine = text.split("\n")[0]?.trim() || "";
+	const snippet = firstLine.replace(/^\/\S+\s*/, "").slice(0, 60).trim();
+	if (!snippet) return basename;
+	const name = `${basename} \u00B7 ${snippet}`;
+	return name.slice(0, 128);
 }

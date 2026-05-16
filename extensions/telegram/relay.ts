@@ -17,7 +17,6 @@ import { unlink } from "node:fs/promises";
 import type { Update, Message } from "./types.js";
 import { RELAY_SOCKET_PATH, ensureRunDir } from "./paths.js";
 import { createLogger } from "./log.js";
-import { notifyError } from "./state.js";
 const log = createLogger("relay");
 import { saveLastUpdateId } from "./config.js";
 
@@ -135,7 +134,8 @@ export class RelayServer {
 			});
 
 			socket.on("error", (err) => {
-				log.warn({ err: err.message }, "Client socket error");
+				const threadIds = [...client.subscriptions.keys()];
+				log.warn({ err: err.message, threadIds }, "Client socket error");
 				this.clients.delete(socket);
 			});
 
@@ -168,6 +168,7 @@ export class RelayServer {
 	 *  This prevents leaking thread-specific messages to unrelated clients. */
 	routeUpdate(update: Update): void {
 		const threadId = threadIdFromUpdate(update);
+		log.debug({ threadId, isMyChatMember: !!update.my_chat_member }, "routeUpdate");
 
 		// my_chat_member updates (pairing/unblocking) - broadcast to all
 		if (update.my_chat_member) {
@@ -340,7 +341,7 @@ export class RelayClient {
 				const socket = createConnection(RELAY_SOCKET_PATH, () => {
 					this.socket = socket;
 					this.connected = true;
-					log.info("Connected to relay server");
+						log.info({ threadIds: [...this.subscriptions.keys()] }, "Connected to relay server");
 
 					// Re-subscribe all known threads
 					this.resubscribe();
@@ -375,7 +376,7 @@ export class RelayClient {
 						clearInterval(this.pingInterval);
 						this.pingInterval = undefined;
 					}
-					log.warn("Disconnected from relay server");
+					log.warn({ threadIds: [...this.subscriptions.keys()] }, "Disconnected from relay server");
 					// Guard against double-fire
 					const cb = this.onDisconnect;
 					this.onDisconnect = undefined;
@@ -452,7 +453,7 @@ export class RelayClient {
 				if (msg.data && this.onUpdate) {
 					// Fire and forget - errors handled by the incoming handler
 					Promise.resolve(this.onUpdate(msg.data)).catch((err) => {
-						notifyError(`Relay update error: ${err instanceof Error ? err.message : String(err)}`);
+						log.warn({ err: err instanceof Error ? err.message : String(err), threadId: msg.data ? threadIdFromUpdate(msg.data) : undefined }, "Relay update error");
 					});
 				}
 				break;
@@ -467,7 +468,7 @@ export class RelayClient {
 				break;
 			case "bye":
 				// Relay is shutting down - trigger failover
-				log.warn("Relay server is shutting down");
+				log.info("Relay server is shutting down");
 				// Clear onDisconnect before disconnect to prevent double-fire from close event
 				const cb = this.onDisconnect;
 				this.onDisconnect = undefined;

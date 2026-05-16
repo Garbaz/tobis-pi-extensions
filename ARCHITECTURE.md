@@ -11,90 +11,184 @@ For development conventions, see `AGENTS.md`.
 
 ### Two-Layer Architecture
 
-The telegram extension operates across two layers. The relay is a role, not a separate layer -- one instance wins the lock and becomes the relay poller.
+The extension has exactly two stateful classes:
 
-| Layer | Scope | Lifetime | Key State |
-|-------|-------|----------|-----------|
-| **Instance** | Pi process | Process-lifetime (pi start to pi quit) | `TelegramState` (api, config, pendingUsers, registry, topicManager, activeChatId), relay role (RelayServer/Client, polling) |
-| **Session** | Pi session | Session-lifetime (/new, /resume, /fork, /reload) | `SessionHandle` (sessionId, sessionFile, threadId, topicName, topicRenamed, outgoing, ctx) |
+| Layer | Class | Lifetime | Cardinality | Owns |
+|-------|-------|----------|-------------|------|
+| **Instance** | `Instance` | Pi process (start to quit) | One per Pi process | api, polling, relay role/server/client, paired chat, pendingUsers, notifier, sessions map, lastActiveSessionId, lastTelegramContext, callback handlers, `autoConnectNextSession` flag |
+| **Session** | `Session` | Pi session (`/new`, `/resume`, `/fork`, `/reload`) | One per Pi session | sessionId, sessionFile, topic (threadId, name, renamed), outgoing handler |
 
-Session state lives in `SessionRegistry` (process-lifetime container, session-lifetime handles). The registry owns the threadId↔sessionId reverse mapping and active session tracking. `TopicManager` handles Telegram API calls (create/restore/close/rename topics) but delegates routing to the registry.
+The relay is a *role* the Instance plays (either `RelayServer` or `RelayClient`), not a third layer.
+
+The Instance is instantiated once in the extension factory and held in a single module-local variable in `index.ts`. There is no shared module-level mutable state outside of that one variable. Every other module either imports a class (and receives an Instance reference via constructor or method parameter) or is a pure-function module.
+
+### Dependency Direction
+
+A strict one-way dependency graph eliminates the cycles that motivated `state.ts`-as-shim:
+
+```
+index.ts ──> Instance ──> Session
+                │
+                ├──> RelayServer / RelayClient
+                ├──> TelegramPolling
+                ├──> TelegramApi
+                └──> Notifier
+```
+
+Rules:
+
+- `Session` receives its `Instance` reference at construction. It calls instance methods, but never imports instance state directly.
+- `Instance` knows about `Session` (it owns the map), `RelayServer/Client`, `TelegramPolling`, `TelegramApi`, `Notifier`.
+- `RelayServer/Client`, `TelegramPolling`, `TelegramApi` do not import `Instance`. They receive callbacks at construction.
+- Pure-function modules (`topic-api.ts`, `session-data.ts`, `config.ts`, `markdown.ts`, `formatting.ts`, `media.ts`, `prompt.ts`) have no module-level state and import nothing from the stateful classes.
+- `incoming.ts` is a pure dispatcher: `handleIncomingUpdate(instance, update)` looks up the relevant `Session` via `instance.sessions` and calls methods on it.
+
+No callback-pointer indirection (no setter-then-call pattern across modules). Wiring is done by direct method calls or constructor injection.
+
+### Notifier and Long-Lived Callbacks
+
+`Notifier` is a stable handle to the user's TUI. Owned by `Instance`. Methods: `notify(message, level)`, `notifyError(message)`, `notifyWarn(message)`, `setStatus(text | undefined)`.
+
+Internally, the Notifier holds an optional `ctx: ExtensionContext | undefined`. Every Pi event handler in `index.ts` calls `instance.notifier.bind(ctx)` as its first action, before any other dispatch. Between events the bound ctx may go stale; long-lived callbacks (polling onError, relay failover, etc.) call notifier methods which try the bound ctx and fall back to `process.stderr` on failure.
+
+This replaces:
+- per-session `ctx` storage
+- `safeCtx()` staleness probing
+- scattered `currentSession()?.ctx` reads in long-lived callbacks
+- the convenience wrappers `notify`, `updateStatus`, `notifyError`, `notifyWarn` in `state.ts`
+
+There is no per-`Session` ctx field. If a Session method needs ctx (e.g., to call `ctx.sessionManager.getSessionFile()`), it takes ctx as a parameter from the caller.
+
+### Active Session is a Cache, not a Router
+
+Pi event handlers always know which session fired the event via `ctx.sessionManager.getSessionId()`. There is no `activeSessionId` mutable router state. Handlers dispatch by `instance.sessions.get(sessionId)`.
+
+The single exception is General-topic routing. When a Telegram message arrives with no `message_thread_id`, we need a target session. For that, `Instance` keeps a `lastActiveSessionId` field, updated only on `input` and `agent_start` events. On a General-topic message:
+
+1. Look up `lastActiveSessionId`.
+2. If the session exists, route to it (echo into its topic thread + reaction on the General-topic message).
+3. If the session is gone (shutdown without a replacement) or the field is unset, *do not silently drop*. Reply in the General topic with a short message telling the user no session is currently active.
+
+The cache is explicitly unauthoritative. Treating it as authoritative routing state was the source of multiple bugs in the previous design.
+
+### Subscription Wiring
+
+`Instance.subscribeThread(threadId, sessionId)` and `Instance.unsubscribeThread(threadId)` are direct methods. They dispatch to `relayServer.subscribeLocal()` or `relayClient.subscribe()` based on the Instance's current role.
+
+`Session.setupTopic()` calls `instance.subscribeThread(this.threadId, this.sessionId)` after the topic is created or restored. `Session.teardown()` calls `instance.unsubscribeThread(this.threadId)`.
+
+On failover (client becomes relay), `Instance` iterates `this.sessions.values()` and calls `relayServer.subscribeLocal(s.threadId)` for each known thread. No external callbacks.
+
+### Auto-Connect Next Session
+
+Replaces the `pendingNewSession` flag. When `/new` is initiated from Telegram, `Instance` sets `autoConnectNextSession = true` before forwarding `/new` to Pi. On the next `session_start`, the handler calls `instance.consumeAutoConnectFlag()`: if true, the new session auto-connects regardless of `reason`. The flag lives on `Instance` (it must — the new session doesn't exist yet at the moment we need to record intent) but the consumption is explicit and one-shot, not a side-channel read of `state.pendingNewSession`.
 
 ### Session Lifecycle: Pi Events and Telegram Mapping
 
 | Pi Event | Telegram Action |
 |----------|-----------------|
 | `session_start(reason=startup)` | No auto-connect. Wait for `/telegram connect`. |
-| `session_start(reason=new)` | No auto-connect. Wait for `/telegram connect`. (Exception: if `pendingNewSession` flag is set from Telegram `/new`, auto-connect.) |
+| `session_start(reason=new)` | No auto-connect, unless `autoConnectNextSession` is set (then auto-connect and clear). |
 | `session_start(reason=resume)` | Auto-connect if `connected: true` in session data. Resume existing topic. |
-| `session_start(reason=reload)` | Auto-connect if `connected: true`. Resume existing topic. |
-| `session_start(reason=fork)` | **Open question** -- see TODO.md. Currently: no auto-connect. |
+| `session_start(reason=reload)` | Auto-connect if `connected: true`. Resume existing topic (transparent — no close+reopen). |
+| `session_start(reason=fork)` | See TODO.md. Currently: no auto-connect. |
 | `session_shutdown(reason=quit)` | Full teardown: close topic, disconnect, stop polling/relay, flush logs. |
-| `session_shutdown(reason=reload)` | Close topic, unsubscribe from relay. API and polling survive (re-used by next session_start). |
-| `session_shutdown(reason=new)` | Close topic, unsubscribe from relay. API and polling survive. |
-| `session_shutdown(reason=fork)` | **Open question** -- see TODO.md. Currently: same as new. |
+| `session_shutdown(reason=reload)` | Unsubscribe from relay. **Topic is not closed** (transparent reload). Api and polling survive. |
+| `session_shutdown(reason=new)` | Close topic, unsubscribe from relay. Api and polling survive. |
+| `session_shutdown(reason=fork)` | See TODO.md. Currently: same as new. |
+
+Reload-as-transparent is a deliberate change from the previous design: closing+reopening the topic on every reload adds Telegram service messages to the chat for no user-visible benefit.
 
 ### Bot Command Layer
 
-Each bot command should clearly belong to a layer:
+Each bot command belongs to exactly one layer, and the dispatch lives in that layer's module:
 
-| Command | Layer | Scope |
-|---------|-------|-------|
+| Command | Layer | Dispatch |
+|---------|-------|----------|
 | `/start` | Instance | Pairing/welcome message |
-| `/status` | Contextual | In General topic: instance + relay info. In session topic: session-specific info. |
+| `/status` (Telegram) | Contextual | In General topic: Instance method (connection, relay, paired user). In session topic: Session method (model, context usage, idle). |
+| `/telegram status` (TUI) | Instance | Same Instance info as General-topic `/status`. |
 | `/model` | Session | Show/switch model for the current session |
-| `/new` | Session | Start a new Pi session, auto-connect to Telegram |
+| `/new` | Instance + Session | Sets Instance's `autoConnectNextSession`, forwards `/new` to Pi |
 | `/compact` | Session | Compact the current session context |
 | `/stop` | Session | Abort the current turn |
 
+`incoming.ts` dispatches commands by looking up the session for the message's thread (or the Instance for thread-less commands) and calling the appropriate method.
+
 ### Telegram-Originated vs TUI Turns
 
-The agent adapts behavior based on turn source (e.g. shorter responses, media awareness). This is communicated via a system prompt suffix: the incoming handler sets `state.lastTelegramContext` on incoming messages, and `before_agent_start` consumes it via `consumeTelegramContext()` and clears the flag. Features that should work regardless of source (like topic renaming) must NOT be on the Telegram-only path -- they belong in Pi events that fire for all input (e.g. `input` event).
+The agent adapts behavior based on turn source (shorter responses, media awareness). Communicated via a system prompt suffix: `incoming.ts` writes `instance.lastTelegramContext` on incoming messages, `before_agent_start` consumes it via `instance.consumeTelegramContext()` and appends to the system prompt. The flag clears on consume so it cannot leak into a subsequent non-Telegram turn.
 
-Telegram-originated messages are NOT prefixed with `[telegram]` in the agent input. The source is communicated exclusively through the system prompt injection, keeping the agent's context clean.
+Telegram-originated messages are **not** prefixed with `[telegram]` in the agent input. The source is communicated exclusively through the system prompt injection, keeping the agent's input transcript clean.
+
+Features that should work regardless of source (e.g. topic renaming) hook into Pi events that fire for all input (`input` event), not the Telegram-specific path.
 
 ### Streaming Preview & Edit-in-Place
 
-During an agent turn, a single Telegram message is maintained as a live preview. Text blocks and tool-call lines are accumulated in an interleaved turn buffer. The preview is edited in-place via throttled `editMessageText` (~1 edit/sec). When the turn ends, the preview is edited with full HTML formatting -- not deleted and resent, to avoid notification spam.
+During an agent turn, a single Telegram message per session is maintained as a live preview. Text blocks and tool-call lines accumulate in an interleaved turn buffer. The preview is edited in-place via throttled `editMessageText` (~1 edit/sec). At `agent_end` the preview is edited with full HTML formatting — not deleted and resent — to avoid notification spam.
 
 Tool lines use a sentinel byte (`\x00TOOL`) so they pass through markdown-to-HTML conversion unmodified, allowing raw HTML formatting for tool summaries.
 
-We use HTML parse mode (not MarkdownV2). See `.agents/context/telegram-api.md` for why.
+HTML parse mode, not MarkdownV2. See `.agents/context/telegram-api.md` for the rationale.
 
 ### Session Data: Read-Merge-Write
 
-All writes to JSON config and session data files use a read-merge-write pattern -- never full overwrite. This prevents clobbering fields that another process or concurrent write might have changed. Public API: `saveConfigField(key, value)` for config, `saveSessionFields(sessionFile, partial)` for session data. The full-overwrite functions are internal-only.
+All writes to JSON config and session data files use a read-merge-write pattern — never full overwrite. This prevents clobbering fields that another process or concurrent write might have changed.
+
+Public API:
+- `saveConfigField(key, value)` for `telegram.json`
+- `saveSessionFields(sessionFile, partial)` for the per-session companion file
+
+The full-overwrite functions are internal to their respective modules.
 
 ### Session Data: Per-Session Companion Files
 
-Telegram session state is persisted as a companion file next to pi's session `.jsonl` file, keyed by the session file basename:
+Telegram session state is persisted as a companion file next to pi's session `.jsonl`, keyed by the session file basename:
 
 ```
 ~/.pi/agent/sessions/--<cwd-encoded>--/
-  2026-05-15T16-00-15-694Z_019e2c5d-....jsonl          (pi's session file)
+  2026-05-15T16-00-15-694Z_019e2c5d-....jsonl           (pi's session file)
   2026-05-15T16-00-15-694Z_019e2c5d-....-telegram.json  (telegram companion)
-  2026-05-15T16-00-15-694Z_019e2c5d-....-media/          (telegram media downloads)
+  2026-05-15T16-00-15-694Z_019e2c5d-....-media/         (telegram media downloads)
 ```
 
-The path is derived from `ctx.sessionManager.getSessionFile()` via `sessionDataPath()`. This is critical because pi's `sessionDir` is shared across all sessions in the same CWD -- two pi instances in `/home/user/project` both resolve to the same `--home-user-project--` directory. A shared file would cause cross-talk and data clobbering. The companion-file approach matches pi's own naming convention and requires no custom directory structure.
+The path is derived from `ctx.sessionManager.getSessionFile()` via `sessionDataPath()` in `session-data.ts`. This is critical because pi's `sessionDir` is shared across all sessions in the same CWD: two pi instances in `/home/user/project` both resolve to the same `--home-user-project--` directory. A shared file would cause cross-talk and data clobbering.
 
-The `sessionFile` (not `sessionDir`) is stored in `SessionHandle` and passed to all session-data functions.
+The `sessionFile` (not `sessionDir`) is stored on `Session` and passed to all `session-data.ts` functions.
+
+Companion schema:
+
+| Field | Purpose |
+|-------|---------|
+| `connected: boolean` | Auto-connect sentinel (see "Connected Sentinel"). |
+| `threadId: number` | Forum topic thread id (kept across disconnects). |
+| `topicName: string` | Topic name (kept across disconnects). |
+| `topicRenamed: boolean` | Whether the topic has been renamed from CWD basename to `basename · snippet`. Persisted so it survives reload/resume. |
+| `firstMessageSnippet: string` | First user-message text captured by `input` event, used to rename the topic once a thread exists. |
 
 ### Config vs Runtime State
 
-Config (`telegram.json`) stores only user-editable persistent settings. Runtime values like `botUsername` (from `getMe()`) and `lastUpdateId` (polling cursor) are module-level variables or stored in `<agentDir>/run/telegram/state.json` -- never in the config file. A migration step strips stale runtime fields from old config files.
+Config (`telegram.json`) stores only user-editable persistent settings. Runtime values like `botUsername` (from `getMe()`) and `lastUpdateId` (polling cursor) live on `Instance` and — for `lastUpdateId` — are persisted to `<agentDir>/run/telegram/state.json`. They are never written to the config file. A migration step strips stale runtime fields from old config files.
 
 ### Connected Sentinel
 
-Session data uses an explicit `connected: boolean` field (not file-existence). Auto-connect on resume/reload only happens when `connected: true`. Disconnect sets `connected: false` but preserves `threadId`/`topicName` so reconnecting can resume the same topic. New sessions (startup/new) never auto-connect -- they require `/telegram connect`.
+Session data uses an explicit `connected: boolean` field, not file-existence. Auto-connect on resume/reload only happens when `connected: true`. Disconnect sets `connected: false` but preserves `threadId`/`topicName` so reconnecting can resume the same topic. New sessions (startup/new) never auto-connect — they require explicit `/telegram connect` (or the `autoConnectNextSession` flag for Telegram-initiated `/new`).
 
 ### Topic Lifecycle
 
-Topics are created immediately on connect (not lazily on first message). The topic name starts as the CWD basename, then renames to `basename . snippet` on the first user message -- from either TUI or Telegram (via the `input` event). This ensures TUI-originated sessions also get meaningful topic names. The rename is one-shot (tracked by `topicRenamed` in `SessionHandle`); topics with a middle dot already in the name are considered already renamed.
+Topics are created eagerly on connect, not lazily on first message. Lazy topic creation was a bug magnet (outgoing handler could receive messages before the thread id was known).
+
+The topic name starts as the CWD basename. On the first user message — from either TUI or Telegram, via the Pi `input` event — the topic is renamed to `basename · snippet`. The first-message text is captured into `firstMessageSnippet` in session data immediately on the `input` event; the rename is applied as soon as both `firstMessageSnippet` is set and the thread exists. This handles the case where the first input arrives before `/telegram connect`.
+
+The rename is one-shot, gated by `topicRenamed: true` in session data. The flag is persisted so a subsequent `/resume` does not re-rename. The previous heuristic (look for a middle dot in the topic name) is removed.
 
 ### General Topic Routing
 
-Messages posted in the General topic (no `message_thread_id`) are routed to the last active session. The bot echoes the message with a prefix into the session's topic thread and adds a reaction on the original General-topic message for visual feedback.
+Messages posted in the General topic (no `message_thread_id`) are routed via the `lastActiveSessionId` cache on `Instance` (see "Active Session is a Cache, not a Router").
+
+When the routed session exists: the bot echoes the message into the session's topic thread with a `👤` prefix and adds a `👀` reaction on the General-topic message for visual feedback.
+
+When `lastActiveSessionId` is unset or stale: the bot replies in the General topic with a short notice ("no active session — open a session topic or start one with /new") instead of silently dropping the message.
 
 ### Media Layout
 
@@ -104,14 +198,14 @@ A brief preview of processor output is echoed back to the Telegram chat before `
 
 ### Relay Architecture
 
-When multiple pi processes share one bot token, only one can long-poll `getUpdates` (see `.agents/context/telegram-api.md` for why). The relay architecture solves this:
+When multiple pi processes share one bot token, only one can long-poll `getUpdates` (see `.agents/context/telegram-api.md` for why). The relay design:
 
-- **Election**: first instance to acquire `<agentDir>/run/telegram/relay.lock` (PID file with stale-detection) becomes the relay.
+- **Election**: first Instance to acquire `<agentDir>/run/telegram/relay.lock` (PID file with stale-detection) takes the relay role.
 - **Relay**: polls `getUpdates`, distributes updates to clients via Unix domain socket (`<agentDir>/run/telegram/relay.sock`).
 - **Clients**: connect to the relay socket, subscribe to specific forum topic threads, receive matching updates.
-- **Outgoing**: all instances send directly to the Telegram API -- outgoing messages don't go through the relay.
-- **Failover**: if the relay process dies, the lock goes stale, and a client acquires it and becomes the new relay.
-- **Thread subscriptions**: `connection.subscribeThread(threadId, sessionId)` dispatches to relay server (`subscribeLocal`) or relay client (`subscribe`) depending on the instance's role. On failover, existing session threads are re-subscribed.
+- **Outgoing**: all instances send directly to the Telegram API. Outgoing messages do not go through the relay.
+- **Failover**: if the relay process dies, the lock goes stale, and a client acquires it and becomes the new relay. On taking the role, `Instance` re-subscribes all its existing session threads locally.
+- **Thread subscription**: `instance.subscribeThread(threadId, sessionId)` dispatches to `relayServer.subscribeLocal` or `relayClient.subscribe` based on role. No callback shim.
 
 ### Notification Strategy
 
@@ -122,8 +216,10 @@ Only the first chunk of the agent's final response triggers a push notification 
 Single-user model with whitelist/blacklist:
 - **`allowedUserId`**: the actively paired user (auto-set on first `/start`).
 - **`whitelist`**: pre-approved user IDs (can connect without pairing).
-- **`blacklist`**: blocked user IDs (silently ignored -- no reply, no notification).
-- **Unknown users**: get a "waiting for authorization" reply + TUI notification.
+- **`blacklist`**: blocked user IDs (silently ignored — no reply, no notification).
+- **Unknown users**: get a "waiting for authorization" reply + TUI notification, and are queued in `instance.pendingUsers`.
+
+Blacklist takes priority over whitelist (a blacklisted user can never bypass via the whitelist).
 
 ---
 
@@ -135,5 +231,27 @@ No special design decisions beyond what's documented in the source. Shadow git r
 
 ## General Principles
 
-- **Never fail silently.** Broken config or extension error -> crash, not silent wrong behavior.
+- **Never fail silently.** Broken config or extension error → crash or notify, not silent wrong behavior. The General-topic stale-cache case (notify the user, do not drop) is the canonical example.
 - **Never overwrite JSON files with partial data.** Always read-merge-write.
+- **One singleton, no module-level mutable state.** The `Instance` is the only stateful singleton, held in `index.ts`. Every other module is either a class or a pure function module.
+- **No callback-pointer indirection between modules.** Cycles are resolved by dependency direction (`Session → Instance`, never the reverse), not by setter-and-call shims.
+
+## Logging
+
+- **pino** for structured file logging. Log file: `<agentDir>/run/telegram/log.jsonl` (NDJSON)
+- **Level control**: `PI_TELEGRAM_LOG` env var -- `info` (default), `debug`, `warn`, `debug:relay,session` (per-module), `off`
+- **Per-module child loggers**: `import { createLogger } from "./log.js"; const log = createLogger("relay");`
+- **User-facing notifications**: `notifyWarn()`/`notifyError()` from `log.ts` (goes through `ctx.ui.notify()` with stderr fallback). Not pino.
+- **Graceful shutdown**: pino uses async buffering (`sync: false`). `flushLogs()` is called in `shutdown()` and via `process.on("beforeExit")` to ensure buffered entries are written before exit.
+
+## Paths
+
+All path constants derive from `getAgentDir()` (imported from `@earendil-works/pi-coding-agent`), which respects `PI_CODING_AGENT_DIR`. No hardcoded `homedir()` + `.pi` paths. See `paths.ts` for the single source of truth.
+
+Layout under `getAgentDir()` (~/.pi/agent/ by default):
+
+```
+extensions/pi-tobis-extensions/telegram.json   config (user-editable)
+run/telegram/                                   runtime: log, relay, state
+sessions/--<cwd>--/.../...-media/               media downloads (per-session)
+```

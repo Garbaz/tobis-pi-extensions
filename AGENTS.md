@@ -35,6 +35,8 @@ Before working on extension code or Telegram API calls, read the relevant refere
 
 ## Conventions
 
+- **Clean working tree before big changes** -- always start from a committed state (`git status` clean) before refactoring, feature work, or any change touching 3+ files. Commit or stash in-progress work first. This gives a clean rollback point and makes diffs reviewable.
+- **Commit after big changes** -- when a coherent change is complete (tests pass, `tsc --noEmit` clean), commit it. Don't accumulate unrelated changes in a dirty working tree. Each commit should be one logical change with a descriptive message.
 - Peer dependencies (`@earendil-works/pi-*`, `typebox`) are provided by pi at runtime -- do not add them to `dependencies`
 - **Clean breaking changes in code, backward compatibility in data formats** -- when refactoring internal APIs, make the clean break in one pass: no deprecated aliases, no compat wrappers, no migration periods. Update all callers immediately, remove old exports in the same commit. However, user-facing data formats (config files, session files) must remain backward-compatible -- an extension update should never require users to manually rewrite config or fiddle with existing sessions.
 - **Document design decisions** at the right level of scope:
@@ -56,9 +58,10 @@ Before working on extension code or Telegram API calls, read the relevant refere
 
 ## Unit tests
 
-Tests verify **architectural decisions from ARCHITECTURE.md**, not code behavior. Every test must map to a specific design choice documented in the architecture, not to an implementation detail the coder happened to write.
+Tests protect against **non-obvious regressions** — things where a naive reimplementation would get it wrong, and the correct behavior isn't immediately obvious from reading the code once. Two categories qualify:
 
-**Derive tests from ARCHITECTURE.md, not from code.** Read the architecture decisions first, identify testable invariants, then write tests that verify them. If a test can't cite an architecture decision, it doesn't belong.
+1. **Architecture decisions** (from ARCHITECTURE.md): cross-module invariants, edge cases where the obvious behavior is wrong, data-loss-prone semantics. These get a D-number comment and a "what would break" explanation.
+2. **Non-obvious implementation details**: logic where the correct behavior is subtle, precedence-dependent, or has footguns that aren't visible at a glance. These don't need an ARCHITECTURE.md citation, but the test comment must explain *why the correct answer isn't obvious* — what a reasonable person would get wrong.
 
 **Write tests for:**
 - Invariants that cross module boundaries (routing, session lifecycle, persistence format)
@@ -67,36 +70,19 @@ Tests verify **architectural decisions from ARCHITECTURE.md**, not code behavior
 - Auth priority rules (e.g. blacklist takes priority over whitelist)
 - Config/state separation (e.g. runtime fields stripped from config on save)
 - Cross-talk prevention (e.g. per-session paths derived from .jsonl basename, not shared sessionDir)
+- Non-obvious precedence rules (e.g. download filename: server extension vs mime type vs fileName — `animation.gif.mp4` edge case)
+- Silent footguns caught by validation (e.g. bash processor missing `{file}` placeholder runs but ignores the media file)
 
 **Don't write tests for:**
-- Trivial Map/setter/getter behavior ("size starts at 0", "get returns undefined for unknown key")
-- Pure formatting functions (truncate, shortenPath, summarizeToolInput, extFromMime, mediaPlaceholder)
+- Trivial Map/setter/getter behavior ("size starts at 0", "get returns undefined for unknown key", `lockToChat` sets `pairedChatId`)
+- Pure formatting/classification functions where the output is obviously correct from reading the code once (truncate, shortenPath, extFromMime, mediaPlaceholder, formatDice, formatPoll, senderName)
 - Code you're about to refactor anyway
 - Things already guaranteed by the type system
-- Code behavior that happens to be true but isn't an architecture decision (e.g. how a formatter stringifies a contact)
+- Duplicates of tests in another file
 - Integration tests against real APIs (those go in `test-media-integration.ts`, not the unit suite)
 
-Each test's comment must state **which architecture decision (D1, D2, etc.)** it verifies and **what would break** if the invariant changed. If you can't articulate that, the test doesn't belong.
+Each test's comment must state **why it matters**: for architecture decisions, cite the D-number and what would break; for non-obvious implementation details, explain what a reasonable person would get wrong. If you can't articulate either, the test doesn't belong.
 
 Runner: `npx tsx --test` (via `npm test`). Files: `extensions/telegram/test-*.ts`.
 Integration tests (real API calls): `extensions/telegram/test-media-integration.ts` (run separately via `npm run test:integration`).
 
-## Logging
-
-- **pino** for structured file logging. Log file: `<agentDir>/run/telegram/log.jsonl` (NDJSON)
-- **Level control**: `PI_TELEGRAM_LOG` env var -- `info` (default), `debug`, `warn`, `debug:relay,session` (per-module), `off`
-- **Per-module child loggers**: `import { createLogger } from "./log.js"; const log = createLogger("relay");`
-- **User-facing notifications**: `notifyWarn()`/`notifyError()` from `log.ts` (goes through `ctx.ui.notify()` with stderr fallback). Not pino.
-- **Graceful shutdown**: pino uses async buffering (`sync: false`). `flushLogs()` is called in `shutdown()` and via `process.on("beforeExit")` to ensure buffered entries are written before exit.
-
-## Paths
-
-All path constants derive from `getAgentDir()` (imported from `@earendil-works/pi-coding-agent`), which respects `PI_CODING_AGENT_DIR`. No hardcoded `homedir()` + `.pi` paths. See `paths.ts` for the single source of truth.
-
-Layout under `getAgentDir()` (~/.pi/agent/ by default):
-
-```
-extensions/pi-tobis-extensions/telegram.json   config (user-editable)
-run/telegram/                                   runtime: log, relay, state
-sessions/--<cwd>--/.../...-media/               media downloads (per-session)
-```

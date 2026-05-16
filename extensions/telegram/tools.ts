@@ -5,7 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import type { TelegramApi } from "./api.js";
-import { state } from "./state.js";
+import type { Instance } from "./instance.js";
 
 /** Queued file to send as a Telegram attachment. */
 export interface PendingFile {
@@ -135,7 +135,7 @@ export async function flushPendingFiles(
 }
 
 /** Register all Telegram action tools with Pi. */
-export function registerTools(pi: ExtensionAPI): void {
+export function registerTools(pi: ExtensionAPI, instance: Instance): void {
 	// ── telegram_send_file ───────────────────────────────────────────────────
 	// Queue files to be sent as attachments when the agent turn ends.
 
@@ -160,7 +160,7 @@ export function registerTools(pi: ExtensionAPI): void {
 		} as const,
 		label: "Telegram Send File",
 		execute: async (_toolCallId: string, params: { paths: string[]; caption?: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) => {
-			if (!state.api) {
+			if (!instance.api) {
 				return {
 					content: [{ type: "text" as const, text: "Telegram is not connected. Files cannot be sent." }],
 					details: undefined as unknown,
@@ -195,9 +195,12 @@ export function registerTools(pi: ExtensionAPI): void {
 			}
 
 			// Queue files on the active session's outgoing handler
+			const activeSession = instance.lastActiveSessionId
+				? instance.sessions.get(instance.lastActiveSessionId)
+				: undefined;
 			const caption = params.caption;
 			for (let i = 0; i < resolvedPaths.length; i++) {
-				state.registry.getActive()?.outgoing?.queueFile({
+				activeSession?.outgoing?.queueFile({
 					path: resolvedPaths[i],
 					caption: i === 0 ? caption : undefined,
 				});

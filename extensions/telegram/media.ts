@@ -4,7 +4,7 @@
 
 import type { TelegramApi } from "./api.js";
 import type { Message, MediaType, MediaProcessor } from "./types.js";
-import { mediaEmoji, mediaLabel, mediaNoProcessorHint } from "./formatting.js";
+import { mediaNoProcessorHint } from "./formatting.js";
 import { execFile } from "node:child_process";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { join, basename } from "node:path";
@@ -125,8 +125,7 @@ export async function downloadMediaFile(
 		throw new Error("file not accessible via Bot API");
 	}
 
-	const response = await api.downloadFile(file.file_path);
-	const buffer = new Uint8Array(await response.arrayBuffer());
+	const buffer = await api.downloadFile(file.file_path);
 
 	// Determine extension - prefer server-assigned from file_path (most reliable),
 	// then mime_type, then default per media type
@@ -145,12 +144,13 @@ export async function downloadMediaFile(
 }
 
 /** Build a placeholder string for a media type with no processor configured.
- *  Format: `<EMOJI> <FILEPATH>\n[No <type> handler configured - <hint>]`
+ *  Format: content first, file path at the bottom in brackets.
  *  localPath is the downloaded file path so the agent can still access it. */
 export function mediaPlaceholder(type: MediaType, _message: Message, localPath: string): string {
-	const emoji = mediaEmoji(type);
 	const hint = mediaNoProcessorHint(type);
-	return `${emoji} ${localPath}\n[No ${mediaLabel(type)} handler configured - ${hint}]`;
+	const parts: string[] = [hint];
+	if (localPath) parts.push(`[${localPath}]`);
+	return parts.join("\n\n");
 }
 
 /** Truncate processor output if it exceeds MAX_PROCESSOR_OUTPUT.

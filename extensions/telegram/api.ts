@@ -1,5 +1,6 @@
 // ── Telegram Bot API Client ─────────────────────────────────────────────────
 // Thin typed wrapper over raw fetch - zero dependencies.
+// Every API call goes through call() or callMultipart(), which log at debug level.
 
 import type {
 	TelegramApiResponse,
@@ -14,6 +15,23 @@ import type {
 	ReplyParameters,
 	LinkPreviewOptions,
 } from "./types.js";
+import { createLogger } from "./log.js";
+const log = createLogger("api");
+
+// ── Log context helper ───────────────────────────────────────────────────────
+// Extracts identifying fields from API params for log correlation.
+// chat_id + message_thread_id identify the session; message_id identifies
+// the specific message. Fields absent from the body are omitted from the log.
+
+function filterLogCtx(body: Record<string, unknown>, keys: string[]): Record<string, unknown> {
+	const ctx: Record<string, unknown> = {};
+	for (const key of keys) {
+		if (body[key] !== undefined && body[key] !== null) {
+			ctx[key] = body[key];
+		}
+	}
+	return ctx;
+}
 
 // ── Rate-limit backoff ───────────────────────────────────────────────────────
 
@@ -46,6 +64,11 @@ export class TelegramApi {
 	 *  Applies a default timeout when no external signal is provided. */
 	private async call<T>(method: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
 		const url = `${this.baseUrl}/bot${this.token}/${method}`;
+		const start = Date.now();
+
+		// Extract identifying fields for log correlation (chat_id, thread, message).
+		const logCtx = filterLogCtx(body, ["chat_id", "message_thread_id", "message_id", "inline_message_id"]);
+		log.debug({ method, ...logCtx }, "\u2192 API");
 
 		// Apply default timeout when no external signal is provided
 		let timeoutController: AbortController | undefined;
@@ -67,17 +90,20 @@ export class TelegramApi {
 				const data = (await response.json()) as TelegramApiResponse<T>;
 
 				if (data.ok && data.result !== undefined) {
+					log.debug({ method, ...logCtx, durationMs: Date.now() - start }, "\u2190 API ok");
 					return data.result;
 				}
 
 				// Retry on 429 with backoff
 				if (data.error_code === 429 && data.parameters?.retry_after && attempt < MAX_RETRIES) {
+					log.warn({ method, ...logCtx, retryAfter: data.parameters.retry_after, attempt }, "API 429, retrying");
 					await sleep(data.parameters.retry_after * 1000);
 					continue;
 				}
 
 				// Migrate to supergroup
 				if (data.parameters?.migrate_to_chat_id !== undefined) {
+					log.warn({ method, ...logCtx, durationMs: Date.now() - start, migrateToChatId: data.parameters.migrate_to_chat_id }, "\u2190 API chat migrated");
 					throw new TelegramApiError(
 						method,
 						data.error_code ?? -1,
@@ -86,8 +112,10 @@ export class TelegramApi {
 					);
 				}
 
+				log.debug({ method, ...logCtx, durationMs: Date.now() - start, errorCode: data.error_code, errorDesc: data.description }, "\u2190 API error");
 				throw new TelegramApiError(method, data.error_code ?? -1, data.description ?? "Unknown error", data.description);
 			}
+			log.warn({ method, ...logCtx, durationMs: Date.now() - start }, "\u2190 API exhausted retries");
 			throw new TelegramApiError(method, 429, "Too Many Requests (exhausted retries)", "retry_after exhausted");
 		} finally {
 			timeoutController?.abort(); // Clear timeout if we finished before it fired
@@ -105,6 +133,11 @@ export class TelegramApi {
 		signal?: AbortSignal,
 	): Promise<T> {
 		const url = `${this.baseUrl}/bot${this.token}/${method}`;
+		const start = Date.now();
+
+		const logCtx = filterLogCtx(fields, ["chat_id", "message_thread_id"]);
+		log.debug({ method, ...logCtx, file: fileName, fileField, fileSize: fileData.size }, "\u2192 API upload");
+
 		const form = new FormData();
 		for (const [key, value] of Object.entries(fields)) {
 			form.set(key, String(value));
@@ -126,16 +159,20 @@ export class TelegramApi {
 				const data = (await response.json()) as TelegramApiResponse<T>;
 
 				if (data.ok && data.result !== undefined) {
+					log.debug({ method, ...logCtx, file: fileName, durationMs: Date.now() - start }, "\u2190 API upload ok");
 					return data.result;
 				}
 
 				if (data.error_code === 429 && data.parameters?.retry_after && attempt < MAX_RETRIES) {
+					log.warn({ method, ...logCtx, retryAfter: data.parameters.retry_after, attempt }, "API 429, retrying");
 					await sleep(data.parameters.retry_after * 1000);
 					continue;
 				}
 
+				log.debug({ method, ...logCtx, file: fileName, durationMs: Date.now() - start, errorCode: data.error_code, errorDesc: data.description }, "\u2190 API upload error");
 				throw new TelegramApiError(method, data.error_code ?? -1, data.description ?? "Upload failed", data.description);
 			}
+			log.warn({ method, ...logCtx, file: fileName, durationMs: Date.now() - start }, "\u2190 API upload exhausted retries");
 			throw new TelegramApiError(method, 429, "Too Many Requests (exhausted retries)", "retry_after exhausted");
 		} finally {
 			timeoutController?.abort();
@@ -144,8 +181,11 @@ export class TelegramApi {
 
 	/** Download a file from Telegram's file server.
 	 *  Applies a 60s default timeout (files can be large). */
-	async downloadFile(filePath: string, signal?: AbortSignal): Promise<Response> {
+	async downloadFile(filePath: string, signal?: AbortSignal): Promise<Uint8Array> {
 		const url = `${this.baseUrl}/file/bot${this.token}/${filePath}`;
+		const start = Date.now();
+
+		log.debug({ method: "downloadFile", filePath }, "\u2192 API");
 
 		let timeoutController: AbortController | undefined;
 		let effectiveSignal: AbortSignal | undefined = signal;
@@ -158,9 +198,14 @@ export class TelegramApi {
 		try {
 			const response = await fetch(url, { signal: effectiveSignal });
 			if (!response.ok) {
+				log.warn({ method: "downloadFile", filePath, durationMs: Date.now() - start, status: response.status }, "\u2190 API download error");
 				throw new TelegramApiError("downloadFile", response.status, `HTTP ${response.status}`, undefined);
 			}
-			return response;
+			// Consume the body before returning — the finally block aborts the
+			// timeout controller, which would kill an open Response stream.
+			const buffer = new Uint8Array(await response.arrayBuffer());
+			log.debug({ method: "downloadFile", filePath, durationMs: Date.now() - start }, "\u2190 API download ok");
+			return buffer;
 		} finally {
 			timeoutController?.abort();
 		}

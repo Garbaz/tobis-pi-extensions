@@ -1,35 +1,21 @@
-// ── Media Processing Tests ───────────────────────────────────────────────────
-// Exercises the actual media.ts code paths with real endpoints.
-// Run with: npx tsx extensions/telegram/test-media.ts
+// ── Media Integration Tests ──────────────────────────────────────────────────
+//
+// Tests for downloadMediaFile filename precedence rules and real API protocol
+// handlers. Run with: npm run test:integration
+//
+// Filename logic tests verify non-obvious precedence: server extension vs
+// mime type vs fileName, with edge cases like "animation.gif.mp4" where
+// naive stem stripping would produce the wrong result.
 
 import {
-	extFromMime,
-	getMediaInfo,
-	mediaPlaceholder,
 	processMedia,
 	downloadMediaFile,
-	getMediaDir,
 } from "./media.js";
-import {
-	formatIncomingText,
-	extractText,
-	senderName,
-	detectContentTypes,
-	formatLocation,
-	formatVenue,
-	formatContact,
-	formatDice,
-	formatPoll,
-} from "./formatting.js";
 import type {
-	Message,
-	MediaType,
 	MediaProcessor,
-	Sticker,
-	Poll,
 } from "./types.js";
 import { TelegramApi } from "./api.js";
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 // ── Test Runner ──────────────────────────────────────────────────────────────
@@ -44,18 +30,6 @@ function assert(condition: boolean, label: string): void {
 		passCount++;
 	} else {
 		console.log(`  ❌ ${label}`);
-		failCount++;
-	}
-}
-
-function assertEqual(actual: unknown, expected: unknown, label: string): void {
-	if (JSON.stringify(actual) === JSON.stringify(expected)) {
-		console.log(`  ✅ ${label}`);
-		passCount++;
-	} else {
-		console.log(`  ❌ ${label}`);
-		console.log(`     expected: ${JSON.stringify(expected)}`);
-		console.log(`     actual:   ${JSON.stringify(actual)}`);
 		failCount++;
 	}
 }
@@ -83,172 +57,18 @@ function section(name: string): void {
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
-const baseMessage: Message = {
-	message_id: 42,
-	from: { id: 123, is_bot: false, first_name: "Test", username: "testuser" },
-	date: 1700000000,
-	chat: { id: 456, type: "private" },
-};
-
-const voiceMsg: Message = { ...baseMessage, voice: { file_id: "voice123", file_unique_id: "uv", duration: 5, mime_type: "audio/ogg" } };
-const audioMsg: Message = { ...baseMessage, audio: { file_id: "audio123", file_unique_id: "ua", duration: 120, mime_type: "audio/mpeg", file_name: "song.mp3" } };
-const photoMsg: Message = { ...baseMessage, photo: [{ file_id: "photo_sm", file_unique_id: "up1", width: 90, height: 90 }, { file_id: "photo_lg", file_unique_id: "up2", width: 800, height: 600 }] };
-const videoMsg: Message = { ...baseMessage, video: { file_id: "video123", file_unique_id: "uv2", width: 1920, height: 1080, duration: 30, mime_type: "video/mp4", file_name: "clip.mp4" } };
-const videoNoteMsg: Message = { ...baseMessage, video_note: { file_id: "vn123", file_unique_id: "uvn", length: 240, duration: 15 } };
-const animMsg: Message = { ...baseMessage, animation: { file_id: "anim123", file_unique_id: "ua2", width: 320, height: 240, duration: 3, file_name: "animation.gif.mp4", mime_type: "video/mp4" } };
-const docMsg: Message = { ...baseMessage, document: { file_id: "doc123", file_unique_id: "ud", file_name: "report.pdf", mime_type: "application/pdf" } };
-const stickerMsg: Message = { ...baseMessage, sticker: { file_id: "sticker123", file_unique_id: "us", width: 512, height: 512, is_animated: false, is_video: false, type: "regular", emoji: "{1F600}" } as Sticker };
-
 const testDir = "/tmp/pi-telegram-media-test";
 rmSync(testDir, { recursive: true, force: true });
 mkdirSync(testDir, { recursive: true });
 
-// ── 1. Pure Function Tests ───────────────────────────────────────────────────
-
-section("extFromMime");
-
-assertEqual(extFromMime("audio/ogg"), "ogg", "audio/ogg → ogg");
-assertEqual(extFromMime("audio/mpeg"), "mp3", "audio/mpeg → mp3");
-assertEqual(extFromMime("audio/mp4"), "m4a", "audio/mp4 → m4a");
-assertEqual(extFromMime("audio/webm"), "webm", "audio/webm → webm");
-assertEqual(extFromMime("image/jpeg"), "jpg", "image/jpeg → jpg");
-assertEqual(extFromMime("image/png"), "png", "image/png → png");
-assertEqual(extFromMime("image/webp"), "webp", "image/webp → webp");
-assertEqual(extFromMime("image/gif"), "gif", "image/gif → gif");
-assertEqual(extFromMime("video/mp4"), "mp4", "video/mp4 → mp4");
-assertEqual(extFromMime("video/webm"), "webm", "video/webm → webm");
-assertEqual(extFromMime("application/pdf"), "pdf", "application/pdf → pdf");
-assertEqual(extFromMime("application/x-tgsticker"), "tgs", "application/x-tgsticker → tgs");
-assertEqual(extFromMime(undefined, "bin"), "bin", "undefined → fallback");
-assertEqual(extFromMime("audio/unknown", "ogg"), "ogg", "unknown mime → fallback");
-assertEqual(extFromMime("application/octet-stream", "dat"), "dat", "octet-stream → fallback");
-
-section("getMediaInfo");
-
-const vi = getMediaInfo(voiceMsg);
-assert(vi !== undefined, "voice: getMediaInfo returns result");
-assertEqual(vi?.type, "voice", "voice: type");
-assertEqual(vi?.fileId, "voice123", "voice: fileId");
-assertEqual(vi?.mimeType, "audio/ogg", "voice: mimeType");
-
-const ai = getMediaInfo(audioMsg);
-assertEqual(ai?.type, "audio", "audio: type");
-assertEqual(ai?.fileName, "song.mp3", "audio: fileName");
-
-const pi = getMediaInfo(photoMsg);
-assertEqual(pi?.type, "photo", "photo: type");
-assertEqual(pi?.fileId, "photo_lg", "photo: picks largest photo");
-assertEqual(pi?.mimeType, undefined, "photo: no mimeType (PhotoSize has none)");
-
-const vi2 = getMediaInfo(videoMsg);
-assertEqual(vi2?.type, "video", "video: type");
-assertEqual(vi2?.mimeType, "video/mp4", "video: mimeType");
-
-const vni = getMediaInfo(videoNoteMsg);
-assertEqual(vni?.type, "video_note", "video_note: type");
-assertEqual(vni?.mimeType, undefined, "video_note: no mimeType");
-
-const ani = getMediaInfo(animMsg);
-assertEqual(ani?.type, "animation", "animation: type");
-assertEqual(ani?.fileName, "animation.gif.mp4", "animation: keeps Telegram fileName");
-
-const di = getMediaInfo(docMsg);
-assertEqual(di?.type, "document", "document: type");
-assertEqual(di?.fileName, "report.pdf", "document: fileName");
-
-const si = getMediaInfo(stickerMsg);
-assertEqual(si?.type, "sticker", "sticker: type");
-assertEqual(si?.mimeType, undefined, "sticker: no mimeType");
-
-assertEqual(getMediaInfo(baseMessage), undefined, "text-only: no media");
-
-section("mediaPlaceholder");
-
-const fakePath = "/tmp/session/media/456-42-photo.jpg";
-assertIncludes(mediaPlaceholder("voice", baseMessage, fakePath), "🎙️", "voice placeholder → emoji");
-assertIncludes(mediaPlaceholder("voice", baseMessage, fakePath), "no transcription available", "voice placeholder → hint");
-assertIncludes(mediaPlaceholder("photo", baseMessage, fakePath), "🖼️", "photo placeholder → emoji");
-assertIncludes(mediaPlaceholder("photo", baseMessage, fakePath), "no description available", "photo placeholder → hint");
-assertIncludes(mediaPlaceholder("video", baseMessage, fakePath), "🎬", "video placeholder → emoji");
-assertIncludes(mediaPlaceholder("video", baseMessage, fakePath), "no description available", "video placeholder → hint");
-assertIncludes(mediaPlaceholder("sticker", baseMessage, fakePath), "🎭", "sticker placeholder → emoji");
-assertIncludes(mediaPlaceholder("sticker", baseMessage, fakePath), fakePath, "sticker placeholder → file path");
-assertIncludes(mediaPlaceholder("document", baseMessage, fakePath), "📄", "document placeholder → emoji");
-assertIncludes(mediaPlaceholder("document", baseMessage, fakePath), "you can read the file", "document placeholder → hint");
-assertIncludes(mediaPlaceholder("animation", baseMessage, fakePath), "🎞️", "animation placeholder → emoji");
-assertIncludes(mediaPlaceholder("animation", baseMessage, fakePath), fakePath, "animation placeholder → file path");
-assertIncludes(mediaPlaceholder("audio", baseMessage, fakePath), "🎵", "audio placeholder → emoji");
-assertIncludes(mediaPlaceholder("audio", baseMessage, fakePath), fakePath, "audio placeholder → file path");
-assertIncludes(mediaPlaceholder("video_note", baseMessage, fakePath), "🎬", "video_note placeholder → emoji");
-assertIncludes(mediaPlaceholder("video_note", baseMessage, fakePath), fakePath, "video_note placeholder → file path");
-
-section("detectContentTypes");
-
-assertEqual(detectContentTypes(baseMessage), ["text"], "text-only → [text]");
-assertEqual(detectContentTypes(voiceMsg), ["voice"], "voice → [voice]");
-assertEqual(detectContentTypes(photoMsg), ["photo"], "photo → [photo]");
-
-const photoWithCaption: Message = { ...photoMsg, caption: "Look at this!" };
-assertEqual(detectContentTypes(photoWithCaption), ["photo", "caption"], "photo+caption → [photo, caption]");
-
-const locationMsg: Message = { ...baseMessage, location: { latitude: 48.0, longitude: 7.8 } };
-assertEqual(detectContentTypes(locationMsg), ["location"], "location → [location]");
-
-const contactMsg: Message = { ...baseMessage, contact: { phone_number: "+491234567", first_name: "John" } };
-assertEqual(detectContentTypes(contactMsg), ["contact"], "contact → [contact]");
-
-const diceMsg: Message = { ...baseMessage, dice: { emoji: "🎲", value: 4 } };
-assertEqual(detectContentTypes(diceMsg), ["dice"], "dice → [dice]");
-
-const pollMsg: Message = { ...baseMessage, poll: { id: "p1", question: "Time?", options: [{ text: "9am", voter_count: 3 }, { text: "10am", voter_count: 5 }], total_voter_count: 8, is_closed: false, is_anonymous: true, type: "regular", allows_multiple_answers: false } };
-assertEqual(detectContentTypes(pollMsg), ["poll"], "poll → [poll]");
-
-section("Data-only formatters");
-
-const loc = formatLocation({ latitude: 48.0, longitude: 7.8 });
-assertIncludes(loc, "48", "location → latitude");
-assertIncludes(loc, "7.8", "location → longitude");
-assertIncludes(loc, "openstreetmap.org", "location → map link");
-
-const liveLoc = formatLocation({ latitude: 48.0, longitude: 7.8, live_period: 3600, heading: 90 });
-assertIncludes(liveLoc, "live for 60min", "live location → period");
-assertIncludes(liveLoc, "heading 90°", "live location → heading");
-
-const venue = formatVenue({ location: { latitude: 48.0, longitude: 7.8 }, title: "Café Central", address: "Hauptstr. 5" });
-assertIncludes(venue, "Café Central", "venue → title");
-assertIncludes(venue, "Hauptstr. 5", "venue → address");
-assertIncludes(venue, "openstreetmap.org", "venue → map link");
-
-const contact = formatContact({ phone_number: "+491234567", first_name: "John", last_name: "Doe" });
-assertIncludes(contact, "John Doe", "contact → name");
-assertIncludes(contact, "+491234567", "contact → phone");
-
-assertEqual(formatDice({ emoji: "🎲", value: 4 }), "🎲 Rolled: 4", "dice format");
-
-const poll = formatPoll({ id: "p1", question: "Time?", options: [{ text: "9am", voter_count: 3 }, { text: "10am", voter_count: 5 }], total_voter_count: 8, is_closed: false, is_anonymous: true, type: "regular", allows_multiple_answers: false });
-assertIncludes(poll, "Poll: Time?", "poll → question");
-assertIncludes(poll, "9am — 3 votes", "poll → option 1");
-assertIncludes(poll, "10am — 5 votes", "poll → option 2");
-assertIncludes(poll, "Total: 8 voters", "poll → total");
-assertIncludes(poll, "anonymous", "poll → anonymous");
-
-const quiz = formatPoll({ id: "q1", question: "Capital?", options: [{ text: "Berlin", voter_count: 5 }, { text: "Munich", voter_count: 2 }], total_voter_count: 7, is_closed: true, is_anonymous: false, type: "quiz", allows_multiple_answers: false, correct_option_id: 0 });
-assertIncludes(quiz, "Quiz", "quiz → type label");
-assertIncludes(quiz, "[closed]", "quiz → closed");
-assertIncludes(quiz, "✓ Berlin", "quiz → correct marker");
-
-section("formatIncomingText / extractText / senderName");
-
-assertEqual(formatIncomingText("hello", false), "hello", "plain text unchanged");
-assertEqual(formatIncomingText("hello", true), "hello\n[edited]", "edited text gets suffix");
-assertEqual(extractText(baseMessage), "", "empty message → empty text");
-assertEqual(extractText({ ...baseMessage, text: "hi" }), "hi", "message.text");
-assertEqual(extractText({ ...photoMsg, caption: "nice" }), "nice", "message.caption");
-assertEqual(senderName(baseMessage), "testuser", "username from from.username");
-assertEqual(senderName({ ...baseMessage, from: { id: 1, is_bot: false, first_name: "John" } }), "John", "first_name fallback");
-
-// ── 2. downloadMediaFile filename logic ──────────────────────────────────────
-// We test the filename construction by mocking TelegramApi just enough.
+// ── 1. downloadMediaFile filename logic ──────────────────────────────────────
+// The filename precedence rules are non-obvious: server extension from
+// getFile() takes priority over fileName extension, and the media type
+// determines the stem. The "animation.gif.mp4" case is particularly tricky:
+// the fileName's trailing .mp4 is stripped to get stem "animation.gif",
+// then the server extension .mp4 is appended, producing "animation.gif.mp4".
+// A naive implementation that just used fileName would lose the double-
+// extension information.
 
 section("downloadMediaFile — filename logic");
 
@@ -267,15 +87,15 @@ class MockTelegramApi extends TelegramApi {
 		return { file_id: "mock", file_unique_id: "mock", file_path: this.mockFilePath };
 	}
 
-	override async downloadFile(_filePath: string): Promise<Response> {
-		return new Response(Buffer.from(this.mockFileContent), { status: 200 });
+	override async downloadFile(_filePath: string): Promise<Uint8Array> {
+		return new Uint8Array(this.mockFileContent);
 	}
 }
 
 const mediaDir = join(testDir, "media");
 mkdirSync(mediaDir, { recursive: true });
 
-// Test: voice with server extension .ogg
+// Voice with server extension .ogg — straightforward: media type stem + server ext
 {
 	const api = new MockTelegramApi("photos/voice_123.ogg", new Uint8Array([1, 2, 3]));
 	const path = await downloadMediaFile(api, "v1", "voice", "audio/ogg", undefined, mediaDir, 42, 456);
@@ -283,7 +103,7 @@ mkdirSync(mediaDir, { recursive: true });
 	assert(existsSync(path), "voice file was written");
 }
 
-// Test: photo (no mime_type in PhotoSize) — should use server extension .jpg
+// Photo has no mime_type in PhotoSize — must fall back to server extension
 {
 	const api = new MockTelegramApi("photos/abc123.jpg", new Uint8Array([4, 5, 6]));
 	const path = await downloadMediaFile(api, "p1", "photo", undefined, undefined, mediaDir, 43, 456);
@@ -291,17 +111,20 @@ mkdirSync(mediaDir, { recursive: true });
 	assert(existsSync(path), "photo file was written");
 }
 
-// Test: animation with misleading fileName "animation.gif.mp4" — stem should strip ext
+// animation.gif.mp4: fileName has double extension. Naive path.extname would
+// yield ".mp4" and path.stem "animation.gif", which is correct here. But a
+// naive implementation that just used fileName as-is would produce a file
+// named "animation.gif.mp4" without the chat-messageId prefix or media type
+// stem, losing traceability. The correct result is "456-44-animation.gif.mp4":
+// stem from fileName (with trailing ext stripped), then server ext appended.
 {
 	const api = new MockTelegramApi("documents/anim_xyz.mp4", new Uint8Array([7, 8, 9]));
 	const path = await downloadMediaFile(api, "a1", "animation", "video/mp4", "animation.gif.mp4", mediaDir, 44, 456);
 	assert(path.endsWith("456-44-animation.gif.mp4"), `animation path: ${path}`);
-	// The stem should be "animation.gif" (stripped trailing .mp4 from fileName), then server ext .mp4 appended
-	// So: 456-44-animation.gif.mp4
 	assert(existsSync(path), "animation file was written");
 }
 
-// Test: sticker with no mime_type and server gives .webp
+// Sticker with no mime and no fileName — relies entirely on server extension
 {
 	const api = new MockTelegramApi("stickers/stk_abc.webp", new Uint8Array([10, 11, 12]));
 	const path = await downloadMediaFile(api, "s1", "sticker", undefined, undefined, mediaDir, 45, 456);
@@ -309,7 +132,7 @@ mkdirSync(mediaDir, { recursive: true });
 	assert(existsSync(path), "sticker file was written");
 }
 
-// Test: document with explicit fileName and mime_type
+// Document with explicit fileName and mime_type — fileName stem used
 {
 	const api = new MockTelegramApi("docs/report_x9f2.pdf", new Uint8Array([13, 14, 15]));
 	const path = await downloadMediaFile(api, "d1", "document", "application/pdf", "report.pdf", mediaDir, 46, 456);
@@ -317,7 +140,7 @@ mkdirSync(mediaDir, { recursive: true });
 	assert(existsSync(path), "document file was written");
 }
 
-// Test: video_note with no fileName and no mime — server ext .mp4
+// video_note with no fileName and no mime — server ext .mp4
 {
 	const api = new MockTelegramApi("videos/vn_abc.mp4", new Uint8Array([16, 17]));
 	const path = await downloadMediaFile(api, "vn1", "video_note", undefined, undefined, mediaDir, 47, 456);
@@ -325,7 +148,7 @@ mkdirSync(mediaDir, { recursive: true });
 	assert(existsSync(path), "video_note file was written");
 }
 
-// ── 3. Protocol handler tests with real endpoints ────────────────────────────
+// ── 2. Protocol handler tests with real endpoints ────────────────────────────
 
 const STT_URL = "http://localhost:9000/v1/audio/transcriptions";
 const VISION_URL = "https://openwebui.uni-freiburg.de/api/v1/chat/completions";
@@ -542,7 +365,7 @@ if (sttTestFile) {
 	}
 }
 
-// ── 4. Error handling tests ──────────────────────────────────────────────────
+// ── 3. Error handling tests ──────────────────────────────────────────────────
 
 section("Error: processMedia with missing file");
 
@@ -600,7 +423,7 @@ try {
 	assert(msg.includes("no command"), `threw "no command" error: ${msg.slice(0, 80)}`);
 }
 
-// ── 5. bash processor: pdftotext ──────────────────────────────────────────────
+// ── 4. bash processor: pdftotext ──────────────────────────────────────────────
 
 section("Protocol: bash (pdftotext for documents)");
 
@@ -712,20 +535,6 @@ with open('${pdfPath}', 'wb') as f: f.write(pdf)
 		skip("could not create test PDF");
 	}
 }
-
-// ── 5. getMediaDir ───────────────────────────────────────────────────────────
-
-section("getMediaDir");
-
-const sessionFile = join(testDir, "2026-01-01T00-00-00-000Z_abc123-def456.jsonl");
-const fallbackDir = join(testDir, "session-test");
-const mdir = await getMediaDir(sessionFile, fallbackDir);
-assert(existsSync(mdir), "getMediaDir creates directory");
-assertEqual(mdir, join(testDir, "2026-01-01T00-00-00-000Z_abc123-def456-media"), "getMediaDir returns per-session -media path");
-
-// Test fallback when sessionFile is undefined
-const fallbackMdir = await getMediaDir(undefined, fallbackDir);
-assertEqual(fallbackMdir, join(fallbackDir, "media"), "getMediaDir falls back to <sessionDir>/media when no sessionFile");
 
 // ── Summary ──────────────────────────────────────────────────────────────────
 

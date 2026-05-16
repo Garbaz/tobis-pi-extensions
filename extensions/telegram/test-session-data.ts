@@ -19,13 +19,19 @@
 //       reconnecting can resume the same topic. An overwrite-based approach
 //       would lose this data on disconnect.
 //
-//   D5: Media directories follow the same per-session naming convention as
-//       companion files, using the session .jsonl basename with -media suffix.
-//       This avoids cross-talk when two pi instances share the same CWD.
+//   D5: topicRenamed persists across sessions: setting it in session data,
+//       reading after fresh load returns true. (Cites "Topic Lifecycle" from
+//       ARCHITECTURE.md — the rename is one-shot, gated by topicRenamed: true
+//       in session data, so it must survive reload/resume.)
+//
+//   D6: firstMessageSnippet captured before topic exists is preserved so it
+//       can be applied when the topic is created later. (Cites "Topic
+//       Lifecycle" — firstMessageSnippet is captured by input event and
+//       applied when both snippet and thread exist.)
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { sessionDataPath, readSessionData, saveSessionFields } from "./topics.js";
+import { sessionDataPath, readSessionData, saveSessionFields } from "./session-data.js";
 import { mediaDirPath, getMediaDir } from "./media.js";
 import { join } from "node:path";
 import { mkdir, rm } from "node:fs/promises";
@@ -36,9 +42,6 @@ const testDir = "/tmp/pi-telegram-session-data-test";
 
 describe("sessionDataPath", () => {
 	// D1: Companion files use the .jsonl basename, not the shared sessionDir.
-	// Two instances in /home/user/project both resolve to the same sessionDir
-	// (--home-user-project--) but have different .jsonl files. Using the
-	// .jsonl basename ensures unique companion files per session.
 	it("derives per-session companion file from .jsonl path (not sessionDir)", () => {
 		const result = sessionDataPath("/home/user/.pi/agent/sessions/--cwd--/2026-05-15_abc123.jsonl");
 		assert.equal(result, "/home/user/.pi/agent/sessions/--cwd--/2026-05-15_abc123-telegram.json");
@@ -51,8 +54,7 @@ describe("sessionDataPath", () => {
 		assert.notEqual(path1, path2);
 	});
 
-	// D2: In-memory sessions (undefined sessionFile) must not write companion
-	// files. saveSessionFields is a no-op when sessionFile is undefined.
+	// D2: In-memory sessions (undefined sessionFile) must not write companion files.
 	it("returns undefined for in-memory sessions (no sessionFile)", () => {
 		assert.equal(sessionDataPath(undefined), undefined);
 	});
@@ -66,10 +68,7 @@ describe("saveSessionFields", () => {
 		await mkdir(testDir, { recursive: true });
 	});
 
-	// D3: saveSessionFields merges, never overwrites. Topic creation writes
-	// {connected: true, threadId: 42} and topic rename writes {topicName: "x"}.
-	// If the second write overwrote the file, threadId and connected would be
-	// lost, causing the session to appear disconnected on resume.
+	// D3: saveSessionFields merges, never overwrites.
 	it("merges without clobbering existing fields", async () => {
 		const sessionFile = join(testDir, "2026-05-15_abc123.jsonl");
 		await saveSessionFields(sessionFile, { connected: true, threadId: 42 });
@@ -81,10 +80,8 @@ describe("saveSessionFields", () => {
 		assert.equal(data.topicName, "renamed");
 	});
 
-	// D4: The connected sentinel uses an explicit boolean. Disconnecting sets
-	// connected: false but preserves threadId/topicName so reconnection can
-	// resume the same topic. If disconnect clobbered the file, the session
-	// would lose its topic on resume.
+	// D4: The connected sentinel uses an explicit boolean. Disconnect preserves
+	// threadId and topicName for resume.
 	it("disconnect preserves threadId and topicName for resume", async () => {
 		const sessionFile = join(testDir, "2026-05-15_abc123.jsonl");
 		await saveSessionFields(sessionFile, { connected: true, threadId: 42, topicName: "my-topic" });
@@ -98,31 +95,61 @@ describe("saveSessionFields", () => {
 
 	// D2: saveSessionFields is a no-op when sessionFile is undefined.
 	it("is a no-op for in-memory sessions (no sessionFile)", async () => {
-		// Should not throw
 		await saveSessionFields(undefined, { connected: true });
-		// Verify no file was created
 		const data = await readSessionData(undefined);
 		assert.equal(data, undefined);
+	});
+
+	// D5: topicRenamed persists across sessions.
+	it("topicRenamed field persists after write and read", async () => {
+		const sessionFile = join(testDir, "2026-05-15_abc123.jsonl");
+		await saveSessionFields(sessionFile, { connected: true, threadId: 42, topicRenamed: true });
+		const data = await readSessionData(sessionFile);
+		assert.ok(data);
+		assert.equal(data.topicRenamed, true, "topicRenamed must persist");
+	});
+
+	// D6: firstMessageSnippet captured before topic exists is preserved.
+	it("firstMessageSnippet is preserved when saved before topic exists", async () => {
+		const sessionFile = join(testDir, "2026-05-15_abc123.jsonl");
+		await saveSessionFields(sessionFile, { firstMessageSnippet: "fix the login bug" });
+		const data = await readSessionData(sessionFile);
+		assert.ok(data);
+		assert.equal(data.firstMessageSnippet, "fix the login bug", "firstMessageSnippet must persist");
+	});
+
+	// Backwards compatibility: reading files without topicRenamed/firstMessageSnippet works.
+	it("reads old files without topicRenamed or firstMessageSnippet gracefully", async () => {
+		const sessionFile = join(testDir, "2026-05-15_abc123.jsonl");
+		// Write a file with only old fields (simulating pre-refactor data)
+		const { writeFile, mkdir: mkdirAsync } = await import("node:fs/promises");
+		const { join: joinPath } = await import("node:path");
+		const filePath = sessionDataPath(sessionFile)!;
+		await mkdirAsync(joinPath(filePath, ".."), { recursive: true });
+		await writeFile(filePath, JSON.stringify({ connected: true, threadId: 42, topicName: "old-topic" }), "utf-8");
+		const data = await readSessionData(sessionFile);
+		assert.ok(data);
+		assert.equal(data.connected, true);
+		assert.equal(data.threadId, 42);
+		assert.equal(data.topicName, "old-topic");
+		assert.equal(data.topicRenamed, undefined, "topicRenamed is undefined for old files");
+		assert.equal(data.firstMessageSnippet, undefined, "firstMessageSnippet is undefined for old files");
 	});
 });
 
 // ── mediaDirPath ─────────────────────────────────────────────────────────────
 
 describe("mediaDirPath", () => {
-	// D5: Media directories follow the same per-session naming convention as
-	// companion files. Using the session .jsonl basename with -media suffix
-	// avoids cross-talk when two pi instances share the same CWD.
+	// D5: Media directories follow the same per-session naming convention.
 	it("derives per-session media dir from .jsonl path", () => {
 		const result = mediaDirPath("/home/user/.pi/agent/sessions/--cwd--/2026-05-15_abc123.jsonl");
 		assert.equal(result, "/home/user/.pi/agent/sessions/--cwd--/2026-05-15_abc123-media");
 	});
 
-	// D2: In-memory sessions fall back to a provided directory.
 	it("returns undefined for in-memory sessions (no sessionFile)", () => {
 		assert.equal(mediaDirPath(undefined), undefined);
 	});
 
-	// D5: Different sessions get different media directories.
 	it("different sessions in the same CWD get different media dirs", () => {
 		const dir1 = mediaDirPath("/home/user/.pi/agent/sessions/--cwd--/2026-05-15_abc.jsonl");
 		const dir2 = mediaDirPath("/home/user/.pi/agent/sessions/--cwd--/2026-05-15_def.jsonl");
@@ -138,15 +165,12 @@ describe("getMediaDir", () => {
 		await mkdir(testDir, { recursive: true });
 	});
 
-	// D5: When sessionFile is available, getMediaDir uses the per-session path.
 	it("uses per-session path when sessionFile is available", async () => {
 		const sessionFile = join(testDir, "2026-01-01T00-00-00-000Z_abc123-def456.jsonl");
 		const dir = await getMediaDir(sessionFile, join(testDir, "fallback"));
 		assert.equal(dir, join(testDir, "2026-01-01T00-00-00-000Z_abc123-def456-media"));
 	});
 
-	// D2: When sessionFile is undefined, getMediaDir falls back to <fallbackDir>/media.
-	// This handles in-memory sessions that still need a media directory.
 	it("falls back to <fallbackDir>/media when no sessionFile", async () => {
 		const fallbackDir = join(testDir, "fallback");
 		const dir = await getMediaDir(undefined, fallbackDir);

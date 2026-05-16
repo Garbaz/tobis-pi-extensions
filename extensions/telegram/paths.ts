@@ -6,7 +6,8 @@
 // Layout under getAgentDir() (~/.pi/agent/ by default):
 //
 //   extensions/pi-tobis-extensions/telegram.json   config (user-editable)
-//   run/telegram/                                   runtime: log, relay, state
+//   run/telegram/                                   runtime: relay socket, state
+//   sessions/--<cwd>--/<timestamp>-telegram-log.jsonl  per-workspace log
 //   sessions/--<cwd>--/.../...-media/                media downloads (per-session)
 //
 // Everything lives under getAgentDir() so PI_CODING_AGENT_DIR is respected.
@@ -54,8 +55,17 @@ export const STATE_PATH = join(RUN_DIR, "state.json");
 
 // ── Log Path ─────────────────────────────────────────────────────────────────
 
-/** Path to the pino NDJSON log file. */
-export const LOG_PATH = join(RUN_DIR, "log.jsonl");
+/** Derive the workspace-scoped log path from a session file path.
+ *  Session file: <dir>/2026-05-16T21-46-48-297Z_019e32c1-...-.jsonl
+ *  Log file:     <dir>/2026-05-16T21-46-48-297Z-telegram-log.jsonl
+ *  The timestamp prefix (before the first _) becomes the log filename prefix. */
+export function workspaceLogPath(sessionFile: string): string {
+	const basename = sessionFile.split("/").pop() ?? "";
+	const underscoreIdx = basename.indexOf("_");
+	const prefix = underscoreIdx > 0 ? basename.slice(0, underscoreIdx) : basename;
+	const dir = sessionFile.slice(0, sessionFile.length - basename.length);
+	return join(dir, `${prefix}-telegram-log.jsonl`);
+}
 
 // ── Config Path ──────────────────────────────────────────────────────────────
 // User-editable config lives under pi's agent extensions directory.

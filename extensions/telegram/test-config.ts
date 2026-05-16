@@ -24,27 +24,8 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import {
-	readConfig,
-	saveConfigField,
-	writeConfig,
-	checkUserAuth,
-	validateMediaConfig,
-} from "./config.js";
+import { checkUserAuth, validateMediaConfig } from "./config.js";
 import type { TelegramConfig } from "./types.js";
-import { mkdir, rm, readFile, unlink } from "node:fs/promises";
-import { join } from "node:path";
-
-// ── Config isolation ──────────────────────────────────────────────────────────
-// We write to a temp config directory and override CONFIG_PATH via environment
-// or direct module manipulation. Since config.ts uses hardcoded paths from
-// paths.ts, we test the logic functions directly and use real file I/O with
-// a known test directory.
-
-// We can't easily override CONFIG_PATH, so we test the logic by calling
-// saveConfigField/readConfig which write to the real config location.
-// For isolation, we use a dedicated test that cleans up after itself.
-// Alternatively, we test the pure functions that don't need file I/O.
 
 // ── checkUserAuth ─────────────────────────────────────────────────────────────
 
@@ -121,11 +102,16 @@ describe("checkUserAuth", () => {
 });
 
 // ── validateMediaConfig ───────────────────────────────────────────────────────
+//
+// Non-obvious implementation details: these validation rules catch silent
+// footguns. A bash processor missing {file} runs without error but ignores
+// the media file — the user would see no transcription with no explanation.
+// An openai processor without url or model fails at runtime with a confusing
+// fetch error instead of a clear config warning at startup.
 
 describe("validateMediaConfig", () => {
-	// Bash processors must contain {file} placeholder, otherwise the media
-	// file path won't be passed to the script. This is a semantic validation
-	// that schema validation can't catch.
+	// Bash processor missing {file}: the command runs but never receives the
+	// media file path. The user sees no output and no error — a silent failure.
 	it("warns when bash processor has no {file} placeholder", () => {
 		const config: TelegramConfig = {
 			botToken: "test",
@@ -138,7 +124,7 @@ describe("validateMediaConfig", () => {
 		assert.ok(warnings.some((w) => w.includes("{file}")), "warning mentions {file}");
 	});
 
-	// Bash processors without a command are misconfigured.
+	// Empty command would pass schema validation but fail at runtime.
 	it("warns when bash processor has no command", () => {
 		const config: TelegramConfig = {
 			botToken: "test",
@@ -150,7 +136,8 @@ describe("validateMediaConfig", () => {
 		assert.ok(warnings.some((w) => w.includes("no command")), "warning mentions no command");
 	});
 
-	// API processors need either url or model configured.
+	// openai-stt without url or model: the default url might be wrong, and
+	// without a model the API returns a generic error. Catch this at startup.
 	it("warns when openai-stt processor has no url or model", () => {
 		const config: TelegramConfig = {
 			botToken: "test",
@@ -162,7 +149,6 @@ describe("validateMediaConfig", () => {
 		assert.ok(warnings.length > 0, "should warn about missing url/model");
 	});
 
-	// Valid config produces no warnings.
 	it("produces no warnings for valid bash processor with {file}", () => {
 		const config: TelegramConfig = {
 			botToken: "test",
@@ -174,7 +160,6 @@ describe("validateMediaConfig", () => {
 		assert.equal(warnings.length, 0);
 	});
 
-	// No media config produces no warnings.
 	it("produces no warnings when media is not configured", () => {
 		const config: TelegramConfig = {
 			botToken: "test",
@@ -183,3 +168,5 @@ describe("validateMediaConfig", () => {
 		assert.equal(warnings.length, 0);
 	});
 });
+
+

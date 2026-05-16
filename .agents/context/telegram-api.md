@@ -28,7 +28,7 @@ MarkdownV2 requires escaping 18 special characters -- every unescaped one crashe
 2. Subsequent chunks: `editMessageText` throttled to ~1/second.
 3. Turn end: final `editMessageText` with notification.
 
-**Identical edit returns 400**: `message is not modified: specified new message content and reply markup are exactly the same`. Our streaming code must catch and suppress this.
+**Identical edit returns 400**: `message is not modified: specified new message content and reply markup are exactly the same`. Our streaming code caches `lastPreviewText` and skips the API call if the text hasn't changed. This prevents a burst of redundant edits when the preview hits `MAX_MESSAGE_LENGTH` and gets truncated -- every subsequent streaming update would otherwise send the same truncated text.
 
 Tool call HTML uses sentinel bytes (`\x00TOOL...\x00`) to bypass markdown conversion -- see `markdown.ts`.
 
@@ -70,6 +70,25 @@ Updates must be acknowledged: `offset = last_update_id + 1`. Unacknowledged upda
 | 403 | Bot blocked / can't send | Log and skip |
 | 409 | Concurrent `getUpdates` | Relay prevents this |
 | 429 | Rate limited | Retry with `retry_after` backoff |
+
+## Reactions (setMessageReaction)
+
+Only specific emojis are valid for `setMessageReaction`. Using any other emoji returns `400 REACTION_INVALID`. The allowed list is defined in the Bot API docs for `ReactionTypeEmoji` and can change between API versions.
+
+**Not allowed** (we used these before -- all fail with REACTION_INVALID):
+- ⏳ (`U+23F3` hourglass) -- was used for "thinking/processing"
+- ✅ (`U+2705` check mark) -- was used for "success/done"
+- ❌ (`U+274C` cross mark) -- was used for "error/failed"
+
+**Valid replacements** (from the 73-emoji allowed list as of Bot API 10.0):
+- 🤔 (`U+1F914`) -- thinking/processing (semantic match for ⏳)
+- 👍 (`U+1F44D`) -- thumbs up (success/acknowledged)
+- 👎 (`U+1F44E`) -- thumbs down (error/failed)
+- 👀 (`U+1F440`) -- eyes (tracking/reading -- already valid)
+
+The full allowed list (73 emojis as of 2026-05): ❤ 👍 👎 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 🤩 🤮 💩 🙏 👌 🕊 🤡 🥱 🥴 😍 🐳 ❤‍🔥 🌚 🌭 💯 🤣 ⚡ 🍌 🏆 💔 🤨 😐 🍓 🍾 💋 🖕 😈 😴 😭 🤓 👻 👨‍💻 👀 🎃 🙈 😇 😨 🤝 ✍ 🤗 🫡 🎅 🎄 ☃ 💅 🤪 🗿 🆒 💘 🙉 🦄 😘 💊 🙊 😎 👾 🤷‍♂ 🤷 🤷‍♀ 😡
+
+Bots can set up to 1 reaction per message (non-premium). Private chats allow reactions by default. Group/channel admins can restrict the allowed set via `available_reactions`.
 
 ## File Handling
 
