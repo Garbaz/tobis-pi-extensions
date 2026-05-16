@@ -6,6 +6,10 @@
 	"type": "object",
 	"additionalProperties": false,
 	"properties": {
+		"$schema": {
+			"type": "string",
+			"description": "JSON Schema URI for IDE validation and auto-completion."
+		},
 		"botToken": {
 			"type": "string",
 			"description": "Telegram bot token from @BotFather (e.g. \"123456:ABC-DEF...\")."
