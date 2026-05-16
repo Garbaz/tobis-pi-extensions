@@ -328,6 +328,8 @@ export class TelegramBridge {
 	/** Route an incoming message to the correct session's outgoing handler
 	 *  based on forum topic thread ID. For General topic messages, echoes the
 	 *  message into the session thread so the reply chain is in the right topic.
+	 *  Adds a \u{1F440} reaction on the original General-topic message to signal
+	 *  that it was routed (silent visual feedback, no text clutter).
 	 *  Returns the echo message ID (if echoed), or undefined. */
 	private async routeToSession(msg: Message | undefined, chatId: number): Promise<number | undefined> {
 		if (!msg || !this.topicManager) return undefined;

@@ -300,6 +300,8 @@ export class OutgoingHandler {
 
 		// Send final response: edit preview in-place with HTML formatting,
 		// or send as new message if no preview exists.
+		// Only the first chunk triggers a push notification; subsequent chunks
+		// are silent (disable_notification) to avoid notification spam.
 		// Edits don't trigger push notifications - the preview already notified.
 		if (content) {
 			let sentFirstChunk = false; // track whether the first chunk was delivered

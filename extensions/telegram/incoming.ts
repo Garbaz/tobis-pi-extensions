@@ -274,6 +274,8 @@ async function handleMessage(
 			await api.sendMessage({ chat_id: message.chat.id, text: "\u{274C} No Pi API available.", reply_parameters: { message_id: message.message_id } });
 			return undefined;
 		}
+		// Flag so session_start knows this /new came from Telegram and should auto-connect.
+		// (session_start checks pendingNewSession before deciding to auto-connect.)
 		state.pendingNewSession = true;
 		state.pi.sendUserMessage("/new");
 		await api.sendMessage({ chat_id: message.chat.id, text: "\u{1F195} Starting new session\u{2026}", reply_parameters: { message_id: message.message_id } });
