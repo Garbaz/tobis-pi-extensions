@@ -54,6 +54,26 @@ Before working on extension code or Telegram API calls, read the relevant refere
 - Config schema: `telegram.schema.json` is the single source of truth. `schema.ts` loads it and wraps TypeBox `Value.Check`/`Default`/`Errors` for runtime validation. Config files should include `$schema` for IDE autocomplete.
 - TypeBox import: `import { Type } from "typebox"`, `import { Check, Default, Errors } from "typebox/value"` -- available as pi peer deps
 
+## Unit tests
+
+Tests verify **architectural decisions**, not code behavior. Every test must map to a specific design choice that could subtly break during refactoring.
+
+**Write tests for:**
+- Invariants that cross module boundaries (routing, session lifecycle, persistence format)
+- Edge cases where the obvious behavior is wrong (e.g. General topic has no session owner, orphaned relay messages must be processed)
+- Merge/overwrite semantics that could cause data loss (e.g. `saveSessionFields` must merge, not clobber)
+- Fallback behaviors that prevent silent failures (e.g. `currentSession` must never return a stale handle)
+
+**Don't write tests for:**
+- Trivial Map/setter/getter behavior ("size starts at 0", "get returns undefined for unknown key")
+- Pure formatting functions (truncate, shortenPath, summarizeToolInput)
+- Code you're about to refactor anyway
+- Things already guaranteed by the type system
+
+Each test's comment must state **which architectural decision** it verifies and **what would break** if the invariant changed. If you can't articulate that, the test doesn't belong.
+
+Runner: `npx tsx --test` (via `npm test`). Files: `extensions/telegram/test-*.ts`.
+
 ## Logging
 
 - **pino** for structured file logging. Log file: `<agentDir>/run/telegram/log.jsonl` (NDJSON)
