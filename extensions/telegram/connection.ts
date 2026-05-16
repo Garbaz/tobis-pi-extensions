@@ -192,6 +192,30 @@ export async function shutdown(): Promise<void> {
 	flushLogs();
 }
 
+// ── Thread Subscription ─────────────────────────────────────────────────────
+// Subscribes/unsubscribes to updates for a specific forum topic thread.
+// As relay: registers the thread locally so shouldSkipLocal() and routeUpdate()
+//           know this instance owns the thread.
+// As client: sends sub/unsub to the relay server so updates are routed to us.
+
+/** Subscribe to updates for a thread. Dispatches to relay server or client. */
+export function subscribeThread(threadId: number, sessionId: string): void {
+	if (state.isRelay) {
+		state.relayServer?.subscribeLocal(threadId);
+	} else if (state.relayClient?.isConnected()) {
+		state.relayClient.subscribe(threadId, sessionId);
+	}
+}
+
+/** Unsubscribe from updates for a thread. Dispatches to relay server or client. */
+export function unsubscribeThread(threadId: number): void {
+	if (state.isRelay) {
+		state.relayServer?.unsubscribeLocal(threadId);
+	} else if (state.relayClient?.isConnected()) {
+		state.relayClient.unsubscribe(threadId);
+	}
+}
+
 // ── Relay Start ──────────────────────────────────────────────────────────────
 
 /** Start as the relay: own the polling loop and distribute updates to clients. */
@@ -254,6 +278,14 @@ async function startAsRelay(): Promise<void> {
 	});
 
 	state.polling.start(state.lastUpdateId ?? 0);
+
+	// Subscribe all existing session threads locally (so shouldSkipLocal and routeUpdate
+	// know this instance owns them). This handles the case where the instance already had
+	// sessions before becoming the relay (e.g., after failover).
+	for (const threadId of state.registry.getThreadIds()) {
+		state.relayServer?.subscribeLocal(threadId);
+	}
+
 	updateStatus();
 }
 
@@ -279,6 +311,12 @@ async function startAsClient(): Promise<void> {
 	if (connected) {
 		// Subscribe to General topic (threadId 0) for unroutable messages
 		state.relayClient.subscribe(0, "general");
+		// Re-subscribe all known session threads
+		for (const handle of state.registry.values()) {
+			if (handle.threadId !== undefined) {
+				state.relayClient.subscribe(handle.threadId, handle.sessionId);
+			}
+		}
 		notifyConnected();
 	} else {
 		// Can't connect to relay - try to become the relay ourselves
@@ -298,8 +336,7 @@ async function attemptFailover(): Promise<void> {
 		state.relayClient = undefined;
 		// Start as relay
 		await startAsRelay();
-		// Re-subscribe all known sessions through the relay server
-		// (The relay processes updates locally, so no subscription needed for itself)
+		// startAsRelay() subscribes all existing session threads locally
 	} else {
 		// Another client won the race - try to reconnect as a client
 		log.info("Another instance became relay - reconnecting as client");

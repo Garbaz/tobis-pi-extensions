@@ -7,6 +7,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readSessionData, saveSessionFields } from "./topics.js";
 import { state, currentSession, activateSession, notify } from "./state.js";
 import { createLogger } from "./log.js";
+import { subscribeThread, unsubscribeThread } from "./connection.js";
 const log = createLogger("session");
 
 // ── Topic Icon Colors ─────────────────────────────────────────────────────────
@@ -123,10 +124,10 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 		await saveSessionFields(sess.sessionFile, { connected: true });
 	}
 
-	// Subscribe to this thread via the relay client (if we're not the relay)
+	// Subscribe to this thread via the relay (local or client)
 	const sessionDataAfter = await readSessionData(sess.sessionFile);
-	if (sessionDataAfter?.threadId && state.relayClient?.isConnected()) {
-		state.relayClient.subscribe(sessionDataAfter.threadId, sess.sessionId);
+	if (sessionDataAfter?.threadId) {
+		subscribeThread(sessionDataAfter.threadId, sess.sessionId);
 	}
 
 	return { action: "skipped" };
@@ -199,10 +200,10 @@ export async function teardownSession(sessionId: string): Promise<void> {
 	const bridge = state.bridge;
 	if (!bridge) return;
 
-	// Unsubscribe from relay client (if we're a client, not the relay)
+	// Unsubscribe from relay (local or client)
 	const topic = bridge.getTopicManager()?.getSessionTopic(sessionId);
-	if (topic?.threadId && state.relayClient?.isConnected()) {
-		state.relayClient.unsubscribe(topic.threadId);
+	if (topic?.threadId) {
+		unsubscribeThread(topic.threadId);
 	}
 
 	// Close the forum topic and remove from session map
