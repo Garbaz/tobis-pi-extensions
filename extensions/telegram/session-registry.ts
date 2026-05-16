@@ -5,7 +5,7 @@
 //
 // Replaces the scattered session state that was previously split across:
 //   - TopicManager (threadId -> sessionId in-memory map)
-//   - bridge.ts (outgoingBySession, currentSessionId)
+//   - scattered per-session state (now in SessionHandle)
 //
 // Layer: Instance (process-lifetime). Session handles are created/destroyed
 // on session_start/session_shutdown, but the registry itself lives for the
@@ -13,7 +13,7 @@
 //
 // NOTE: OutgoingHandler is NOT imported here to avoid circular deps
 // (outgoing.ts → session.ts → state.ts → session-registry.ts).
-// The outgoing field is set externally by bridge.ts when topics are created.
+// The outgoing field is set by session.registerSession/restoreSession when topics are created.
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -42,7 +42,7 @@ export class SessionHandle {
 	/** Whether the topic has been renamed from CWD basename to "basename . snippet". */
 	topicRenamed: boolean;
 
-	/** Per-session outgoing message handler. Set by bridge.registerSession/restoreSession. */
+	/** Per-session outgoing message handler. Set by session.registerSession/restoreSession. */
 	outgoing: OutgoingHandler | undefined;
 
 	/** Fresh ExtensionContext, refreshed by every Pi event handler.
@@ -68,7 +68,7 @@ export class SessionRegistry {
 	/** The most recently activated session (for General topic routing). */
 	private activeSessionId: string | undefined;
 
-	/** Register a new session. OutgoingHandler is set later by bridge.registerSession. */
+	/** Register a new session. OutgoingHandler is set later by session.registerSession. */
 	register(sessionId: string, sessionFile: string | undefined): SessionHandle {
 		const handle = new SessionHandle(sessionId, sessionFile);
 		this.sessions.set(sessionId, handle);

@@ -449,7 +449,7 @@ export class RelayClient {
 		switch (msg.type) {
 			case "update":
 				if (msg.data && this.onUpdate) {
-					// Fire and forget - errors handled by the bridge
+					// Fire and forget - errors handled by the incoming handler
 					Promise.resolve(this.onUpdate(msg.data)).catch((err) => {
 						notifyError(`Relay update error: ${err instanceof Error ? err.message : String(err)}`);
 					});

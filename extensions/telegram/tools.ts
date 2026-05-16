@@ -5,7 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import type { TelegramApi } from "./api.js";
-import { state } from "./state.js";
+import { state, queueFile } from "./state.js";
 
 /** Queued file to send as a Telegram attachment. */
 export interface PendingFile {
@@ -160,8 +160,7 @@ export function registerTools(pi: ExtensionAPI): void {
 		} as const,
 		label: "Telegram Send File",
 		execute: async (_toolCallId: string, params: { paths: string[]; caption?: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) => {
-			const bridge = state.bridge;
-			if (!bridge) {
+			if (!state.api) {
 				return {
 					content: [{ type: "text" as const, text: "Telegram is not connected. Files cannot be sent." }],
 					details: undefined as unknown,
@@ -195,10 +194,10 @@ export function registerTools(pi: ExtensionAPI): void {
 				};
 			}
 
-			// Queue files on the bridge's outgoing handler
+			// Queue files on the active session's outgoing handler
 			const caption = params.caption;
 			for (let i = 0; i < resolvedPaths.length; i++) {
-				bridge.queueFile({
+				queueFile({
 					path: resolvedPaths[i],
 					caption: i === 0 ? caption : undefined,
 				});

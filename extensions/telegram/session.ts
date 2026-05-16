@@ -4,8 +4,10 @@
 // "basename · snippet" on the first incoming user message.
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { OutgoingHandler } from "./outgoing.js";
+import { TopicManager } from "./topics.js";
 import { readSessionData, saveSessionFields } from "./topics.js";
-import { state, currentSession, activateSession, notify } from "./state.js";
+import { state, currentSession, activateSession, getActiveChatId, notify } from "./state.js";
 import { createLogger } from "./log.js";
 import { subscribeThread, unsubscribeThread } from "./connection.js";
 const log = createLogger("session");
@@ -57,6 +59,88 @@ export interface TopicSetupResult {
 	topicName?: string;
 }
 
+// ── Session Registration ─────────────────────────────────────────────────────
+// These methods manage the relationship between a session and its forum topic.
+// They create OutgoingHandler instances and register thread↔session mappings.
+
+/** Register a session with a forum topic. Creates the topic if topics are enabled.
+ *  Configures the session handle's outgoing handler with thread and chat info.
+ *  Returns the thread ID, or undefined if topics are disabled. */
+export async function registerSession(sessionId: string, sessionName: string, signal?: AbortSignal, iconColor?: number): Promise<number | undefined> {
+	const tm = state.topicManager;
+	const api = state.api;
+	if (!tm || !api) return undefined;
+
+	const threadId = await tm.createTopic(sessionId, sessionName, signal, iconColor);
+	if (threadId !== undefined) {
+		const handle = state.registry.get(sessionId);
+		if (handle) {
+			const outgoing = new OutgoingHandler(api);
+			const chatId = getActiveChatId();
+			if (chatId) outgoing.setActiveChatId(chatId);
+			outgoing.setThreadId(threadId);
+			handle.outgoing = outgoing;
+		}
+		state.registry.setThread(sessionId, threadId, sessionName);
+	}
+	return threadId;
+}
+
+/** Restore a session's existing forum topic (e.g., on reload/resume).
+ *  Reopens the topic and configures the session handle's outgoing handler.
+ *  Returns the thread ID, or undefined if topics are disabled. */
+export async function restoreSession(sessionId: string, threadId: number, name: string, signal?: AbortSignal): Promise<number | undefined> {
+	const tm = state.topicManager;
+	const api = state.api;
+	if (!tm || !api) return undefined;
+
+	const restoredThreadId = await tm.restoreSession(sessionId, threadId, name, signal);
+	if (restoredThreadId !== undefined) {
+		const handle = state.registry.get(sessionId);
+		if (handle) {
+			const outgoing = new OutgoingHandler(api);
+			const chatId = getActiveChatId();
+			if (chatId) outgoing.setActiveChatId(chatId);
+			outgoing.setThreadId(restoredThreadId);
+			handle.outgoing = outgoing;
+		}
+		state.registry.setThread(sessionId, restoredThreadId, name);
+	}
+	return restoredThreadId;
+}
+
+/** Unregister a session - close its forum topic.
+ *  Session handle is removed from registry by the caller (index.ts session_shutdown). */
+export async function unregisterSession(sessionId: string, signal?: AbortSignal): Promise<void> {
+	const tm = state.topicManager;
+	if (tm) {
+		await tm.closeTopic(sessionId, signal);
+	}
+}
+
+// ── Topics Control ──────────────────────────────────────────────────────────
+
+/** Enable or disable forum topic support.
+ *  If chatId is provided and no activeChatId is set, uses the provided chatId.
+ *  This is needed because topics can be created before the first message arrives
+ *  (e.g., at session_start when we already know the paired user's chat ID). */
+export function setTopicsEnabled(enabled: boolean, chatId?: number): void {
+	if (!state.api) return;
+	if (enabled) {
+		const effectiveChatId = state.activeChatId ?? chatId;
+		if (effectiveChatId && !state.topicManager) {
+			state.topicManager = new TopicManager(state.api, effectiveChatId);
+			state.topicManager.setTopicsEnabled(true);
+		} else if (state.topicManager) {
+			state.topicManager.setTopicsEnabled(true);
+		}
+	} else {
+		state.topicManager = undefined;
+	}
+}
+
+// ── Session Topic Setup ──────────────────────────────────────────────────────
+
 /** Creates or resumes a forum topic for the current session.
  *  Called from session_start and /telegram connect.
  *
@@ -67,10 +151,9 @@ export interface TopicSetupResult {
  *  - Subscribes to the thread via relay client if applicable. */
 export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionStartReason): Promise<TopicSetupResult> {
 	const sess = currentSession();
-	const bridge = state.bridge;
-	const tm = bridge?.getTopicManager();
-	log.debug({ hasSession: !!sess, hasBridge: !!bridge, hasTm: !!tm, allowedUserId: state.config.allowedUserId, reason }, "setupSessionTopic");
-	if (!sess || !bridge || !tm || !state.config.allowedUserId) return { action: "skipped" };
+	const tm = state.topicManager;
+	log.debug({ hasSession: !!sess, hasTm: !!tm, allowedUserId: state.config.allowedUserId, reason }, "setupSessionTopic");
+	if (!sess || !tm || !state.config.allowedUserId) return { action: "skipped" };
 
 	const label = cwdBasename();
 	log.debug({ sessionId: sess.sessionId.slice(0, 8), label, topicsEnabled: state.topicsEnabled, topicRenamed: sess.topicRenamed }, "setupSessionTopic: init");
@@ -83,7 +166,7 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 	log.debug({ canResume, hasSessionData: !!sessionData, threadId: sessionData?.threadId }, "setupSessionTopic: resume check");
 	if (canResume && sessionData?.threadId) {
 		// Resume existing topic
-		const threadId = await bridge.restoreSession(
+		const threadId = await restoreSession(
 			sess.sessionId,
 			sessionData.threadId,
 			sessionData.topicName ?? label,
@@ -101,7 +184,7 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 		// Create the topic immediately so it's ready for messages.
 		const iconColor = TOPIC_ICON_COLORS[Math.floor(Math.random() * TOPIC_ICON_COLORS.length)];
 		log.debug({ label, sessionId: sess.sessionId.slice(0, 8) }, "setupSessionTopic: creating topic");
-		const threadId = await bridge.registerSession(sess.sessionId, label, undefined, iconColor);
+		const threadId = await registerSession(sess.sessionId, label, undefined, iconColor);
 		log.debug({ threadId }, "setupSessionTopic: registered");
 		let created = false;
 		if (threadId !== undefined) {
@@ -139,10 +222,9 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
  *  Returns the thread ID, or undefined if topics are disabled. */
 export async function ensureTopicCreated(): Promise<number | undefined> {
 	const sess = currentSession();
-	const bridge = state.bridge;
-	const tm = bridge?.getTopicManager();
-	log.debug({ hasSession: !!sess, hasBridge: !!bridge, hasTm: !!tm }, "ensureTopicCreated");
-	if (!sess || !bridge || !tm) return undefined;
+	const tm = state.topicManager;
+	log.debug({ hasSession: !!sess, hasTm: !!tm }, "ensureTopicCreated");
+	if (!sess || !tm) return undefined;
 
 	log.debug({ sessionId: sess.sessionId.slice(0, 8) }, "ensureTopicCreated: checking");
 
@@ -158,7 +240,7 @@ export async function ensureTopicCreated(): Promise<number | undefined> {
 	const label = cwdBasename();
 	log.debug({ label, sessionId: sess.sessionId.slice(0, 8) }, "ensureTopicCreated: creating fallback topic");
 
-	const threadId = await bridge.registerSession(sess.sessionId, label, undefined, iconColor);
+	const threadId = await registerSession(sess.sessionId, label, undefined, iconColor);
 	log.debug({ threadId }, "ensureTopicCreated: registered");
 	if (threadId !== undefined) {
 		activateSession(sess.sessionId);
@@ -172,7 +254,7 @@ export async function ensureTopicCreated(): Promise<number | undefined> {
  *  Skipped if topic was already renamed in a previous session (resumed). */
 export async function renameTopicFromMessage(text: string): Promise<void> {
 	const sess = currentSession();
-	const tm = state.bridge?.getTopicManager();
+	const tm = state.topicManager;
 	log.debug({ hasSession: !!sess, topicRenamed: sess?.topicRenamed, hasTm: !!tm }, "renameTopicFromMessage");
 	if (!sess || sess.topicRenamed || !tm) {
 		return;
@@ -197,17 +279,17 @@ export async function renameTopicFromMessage(text: string): Promise<void> {
  *  Closes the forum topic, unsubscribes from relay, and removes session from the map.
  *  Called from session_shutdown - only polling stops on "quit" (handled by caller). */
 export async function teardownSession(sessionId: string): Promise<void> {
-	const bridge = state.bridge;
-	if (!bridge) return;
+	const tm = state.topicManager;
+	if (!tm) return;
 
 	// Unsubscribe from relay (local or client)
-	const topic = bridge.getTopicManager()?.getSessionTopic(sessionId);
+	const topic = tm.getSessionTopic(sessionId);
 	if (topic?.threadId) {
 		unsubscribeThread(topic.threadId);
 	}
 
 	// Close the forum topic and remove from session map
-	await bridge.unregisterSession(sessionId);
+	await unregisterSession(sessionId);
 
 	// Note: session state is already removed from the sessions map by the caller
 	// (index.ts session_shutdown handler calls removeSession before teardownSession)

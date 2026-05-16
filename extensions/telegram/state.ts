@@ -15,10 +15,26 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TelegramApi } from "./api.js";
 import type { TelegramPolling } from "./polling.js";
-import type { TelegramBridge } from "./bridge.js";
 import type { TelegramConfig } from "./types.js";
 import type { RelayServer, RelayClient } from "./relay.js";
+import type { TopicManager } from "./topics.js";
 import { SessionRegistry, type SessionHandle } from "./session-registry.js";
+// ── Types (moved from bridge.ts) ─────────────────────────────────────────────
+
+/** Handler for a Telegram callback query. Return true to consume, false to pass. */
+export type CallbackHandler = (query: import("./types.js").CallbackQuery, api: import("./api.js").TelegramApi) => Promise<boolean>;
+
+/** Context about the Telegram message that triggered the current turn.
+ *  Set by incoming handler, consumed by before_agent_start to inject system prompt,
+ *  cleared after injection so it doesn't leak into non-Telegram turns. */
+export interface TelegramTurnContext {
+	/** Telegram username (without @) of the sender, if available. */
+	username: string | undefined;
+	/** Content types present in the message. */
+	types: import("./formatting.js").ContentType[];
+	/** Media types that had no processor configured - raw file only, no transcription/description. */
+	unprocessed: import("./types.js").MediaType[];
+}
 
 // ── Pending User ──────────────────────────────────────────────────────────────
 
@@ -48,8 +64,15 @@ export interface TelegramState {
 	api: TelegramApi | undefined;
 	/** Long-polling loop (only set when we are the relay). */
 	polling: TelegramPolling | undefined;
-	/** Bridge orchestrator for incoming/outgoing message routing. */
-	bridge: TelegramBridge | undefined;
+	// ── Instance state (moved from bridge) ────────────────────────────────
+	/** The chat ID currently locked to the Pi session. */
+	activeChatId: number | undefined;
+	/** Forum topic manager. Created on connect when topics are enabled. */
+	topicManager: TopicManager | undefined;
+	/** Context from the last Telegram message (consumed by before_agent_start). */
+	lastTelegramContext: TelegramTurnContext | undefined;
+	/** Registered callback query handlers, keyed by prefix. */
+	callbackHandlers: Map<string, CallbackHandler>;
 
 	// ── Runtime info (set by getMe() on connect) ──────────────────────────
 	/** Bot username from getMe(). Not persisted. */
@@ -98,7 +121,6 @@ export const state: TelegramState = {
 	},
 	api: undefined,
 	polling: undefined,
-	bridge: undefined,
 	botUsername: undefined,
 	topicsEnabled: false,
 	lastUpdateId: undefined,
@@ -108,7 +130,127 @@ export const state: TelegramState = {
 	pendingUsers: new Map(),
 	registry: new SessionRegistry(),
 	pendingNewSession: false,
+	activeChatId: undefined,
+	topicManager: undefined,
+	lastTelegramContext: undefined,
+	callbackHandlers: new Map(),
 };
+
+// ── Bridge State Accessors ────────────────────────────────────────────────────
+// These replaced bridge getter methods. They read from state directly.
+// The bridge class has been dissolved - all state and logic lives here
+// or in incoming.ts, session.ts, connection.ts.
+
+/** Get the currently locked chat ID. */
+export function getActiveChatId(): number | undefined {
+	return state.activeChatId;
+}
+
+/** Lock the instance to a specific chat. */
+export function lockToChat(chatId: number): void {
+	state.activeChatId = chatId;
+	// Update outgoing handlers for all sessions
+	for (const handle of state.registry.values()) {
+		handle.outgoing?.setActiveChatId(chatId);
+	}
+	if (state.topicManager) {
+		state.topicManager.setChatId(chatId);
+	}
+}
+
+/** Unlock from the current chat. */
+export function unlockChat(): void {
+	if (state.activeChatId !== undefined) {
+		state.activeChatId = undefined;
+		for (const handle of state.registry.values()) {
+			handle.outgoing?.setActiveChatId(undefined);
+		}
+	}
+}
+
+/** Get and clear the last Telegram turn context (for system prompt injection). */
+export function consumeTelegramContext(): TelegramTurnContext | undefined {
+	const ctx = state.lastTelegramContext;
+	state.lastTelegramContext = undefined;
+	return ctx;
+}
+
+/** Register a callback query handler. Returns unsubscribe function. */
+export function registerCallbackHandler(prefix: string, handler: CallbackHandler): () => void {
+	state.callbackHandlers.set(prefix, handler);
+	return () => { state.callbackHandlers.delete(prefix); };
+}
+
+/** Dispatch a callback query to registered handlers. Returns true if consumed. */
+export async function dispatchCallbackQuery(query: import("./types.js").CallbackQuery): Promise<boolean> {
+	const data = query.data;
+	if (!data || !state.api) return false;
+	for (const [prefix, handler] of state.callbackHandlers) {
+		if (data.startsWith(prefix)) {
+			const consumed = await handler(query, state.api);
+			if (consumed) return true;
+		}
+	}
+	return false;
+}
+
+// ── Outgoing Dispatch Helpers ────────────────────────────────────────────────
+// Thin wrappers over the active session's outgoing handler.
+// These replace the bridge's outgoing delegation methods.
+
+/** Send final response and update reaction on agent_end. */
+export async function dispatchAgentEnd(event: { messages: unknown[] }, ctx: ExtensionContext): Promise<void> {
+	const outgoing = state.registry.getActive()?.outgoing;
+	if (outgoing) await outgoing.onAgentEnd(event, ctx);
+}
+
+/** Update streaming preview on message_update. */
+export async function dispatchMessageUpdate(event: { message: unknown; assistantMessageEvent: unknown }, ctx: ExtensionContext): Promise<void> {
+	const outgoing = state.registry.getActive()?.outgoing;
+	if (outgoing) await outgoing.onMessageUpdate(event, ctx);
+}
+
+/** Flush any pending streaming edit. */
+export async function flushPendingEdit(): Promise<void> {
+	const outgoing = state.registry.getActive()?.outgoing;
+	if (outgoing) await outgoing.flushPendingEdit();
+}
+
+/** Start sending typing indicators. */
+export function startTypingIndicator(ctx: ExtensionContext): void {
+	const outgoing = state.registry.getActive()?.outgoing;
+	if (outgoing) outgoing.startTypingIndicator(ctx);
+}
+
+/** Stop the typing indicator. */
+export function stopTypingIndicator(): void {
+	const outgoing = state.registry.getActive()?.outgoing;
+	if (outgoing) outgoing.stopTypingIndicator();
+}
+
+/** Queue a file for sending on the next agent_end. */
+export function queueFile(file: import("./tools.js").PendingFile): void {
+	const outgoing = state.registry.getActive()?.outgoing;
+	if (outgoing) outgoing.queueFile(file);
+}
+
+/** Echo a TUI-originated user message to Telegram. */
+export async function sendUserEcho(text: string): Promise<void> {
+	const outgoing = state.registry.getActive()?.outgoing;
+	if (outgoing) await outgoing.sendUserEcho(text);
+}
+
+/** Notify Telegram of tool execution start. */
+export async function dispatchToolStart(toolName: string, args: Record<string, unknown>): Promise<void> {
+	const outgoing = state.registry.getActive()?.outgoing;
+	if (outgoing) await outgoing.onToolExecutionStart(toolName, args);
+}
+
+/** Notify Telegram of tool execution end. */
+export function dispatchToolEnd(toolName: string, args: Record<string, unknown>, isError: boolean): void {
+	const outgoing = state.registry.getActive()?.outgoing;
+	if (outgoing) outgoing.onToolExecutionEnd(toolName, args, isError);
+}
 
 // ── Session Access Helpers ────────────────────────────────────────────────────
 // Thin wrappers over state.registry. Callers can also access the registry

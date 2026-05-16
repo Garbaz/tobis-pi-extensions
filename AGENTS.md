@@ -25,7 +25,7 @@ What does **not** go in AGENTS.md:
 Before working on extension code or Telegram API calls, read the relevant reference:
 
 - **`.agents/context/pi-internals.md`** -- pi's ExtensionAPI, event lifecycle, session model, concurrency, gotchas. Read before touching `index.ts` event handlers or `ctx`/`pi` methods.
-- **`.agents/context/telegram-api.md`** -- Telegram Bot API quirks, HTML parse mode, rate limits, forum topics, message splitting. Read before touching `api.ts`, `outgoing.ts`, `bridge.ts`, or `polling.ts`.
+- **`.agents/context/telegram-api.md`** -- Telegram Bot API quirks, HTML parse mode, rate limits, forum topics, message splitting. Read before touching `api.ts`, `outgoing.ts`, `incoming.ts`, or `polling.ts`.
 
 ## Adding a new extension
 

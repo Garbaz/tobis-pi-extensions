@@ -8,19 +8,52 @@
 import type { ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { TelegramApi } from "./api.js";
 import { TelegramPolling } from "./polling.js";
-import { TelegramBridge } from "./bridge.js";
-import { saveConfigField, readLastUpdateId, saveLastUpdateId } from "./config.js";
+import { saveConfigField, readLastUpdateId, saveLastUpdateId, allowUser } from "./config.js";
 import { RelayServer, RelayClient } from "./relay.js";
 import { tryAcquireRelayLock, releaseRelayLock } from "./relay-lock.js";
+import { handleIncomingUpdate, setAcceptCallback } from "./incoming.js";
 import { createLogger, flushLogs, notifyError, notifyWarn } from "./log.js";
 const log = createLogger("lifecycle");
-import { state, updateStatus, notify, currentSession, safeCtx } from "./state.js";
-import { setupSessionTopic } from "./session.js";
+import { state, updateStatus, notify, currentSession, safeCtx, lockToChat, unlockChat, stopTypingIndicator } from "./state.js";
+import { setupSessionTopic, setTopicsEnabled } from "./session.js";
 import { saveSessionFields } from "./topics.js";
+
+// ── Accept Callback ──────────────────────────────────────────────────────────
+// Called when a user is accepted (first authorized message or /telegram allow).
+// Config is already mutated by the caller (same object reference as state.config).
+
+async function onAccept(userId: number, userName: string): Promise<void> {
+	// Save the allowed user ID to config
+	await saveConfigField("allowedUserId", state.config.allowedUserId);
+	// Also ensure user is in the whitelist
+	const wl = state.config.whitelist ?? [];
+	if (!wl.includes(userId)) {
+		state.config.whitelist = [...wl, userId];
+		await saveConfigField("whitelist", state.config.whitelist);
+	}
+	// Remove from pending if present
+	state.pendingUsers.delete(userId);
+	// Now that we know the chat ID, enable topics if supported
+	if (state.topicsEnabled && state.config.allowedUserId) {
+		setTopicsEnabled(true, state.config.allowedUserId);
+	}
+	notify(`Telegram: paired with ${userName} (${userId})`, "info");
+	updateStatus();
+	// Set up topic for the current session after pairing
+	const sessCtx = safeCtx(currentSession()?.ctx);
+	if (sessCtx) {
+		const result = await setupSessionTopic(sessCtx);
+		if (result.action === "created" && result.topicName) {
+			notify(`Telegram: topic "${result.topicName}"`, "info");
+		} else if (result.action === "resumed" && result.topicName) {
+			notify(`Telegram: resumed topic "${result.topicName}"`, "info");
+		}
+	}
+}
 
 // ── Connect / Disconnect ─────────────────────────────────────────────────────
 
-/** Establish the Telegram connection: verify token, create bridge, start polling or relay client. */
+/** Establish the Telegram connection: verify token, start polling or relay client. */
 export async function connect(ctx: ExtensionCommandContext | ExtensionContext): Promise<void> {
 	if (!state.config.botToken) {
 		ctx.ui.notify("Telegram: no bot token configured. Use /telegram setup", "warning");
@@ -56,58 +89,19 @@ export async function connect(ctx: ExtensionCommandContext | ExtensionContext): 
 		return;
 	}
 
-	state.bridge = new TelegramBridge(state.api, state.config, state.pi, {
-		onAccept: async (userId: number, userName: string) => {
-			// Config is already mutated by the bridge (same object reference)
-			await saveConfigField("allowedUserId", state.config.allowedUserId);
-			// Also ensure user is in the whitelist
-			const wl = state.config.whitelist ?? [];
-			if (!wl.includes(userId)) {
-				state.config.whitelist = [...wl, userId];
-				await saveConfigField("whitelist", state.config.whitelist);
-			}
-			// Remove from pending if present
-			state.pendingUsers.delete(userId);
-			// Now that we know the chat ID, enable topics if supported
-			if (state.topicsEnabled && state.config.allowedUserId) {
-				state.bridge?.setTopicsEnabled(true, state.config.allowedUserId);
-			}
-			notify(`Telegram: paired with ${userName} (${userId})`, "info");
-			updateStatus();
-			// Set up topic for the current session after pairing
-			const sessCtx = safeCtx(currentSession()?.ctx);
-			if (sessCtx) {
-				const result = await setupSessionTopic(sessCtx);
-				if (result.action === "created" && result.topicName) {
-					notify(`Telegram: topic "${result.topicName}"`, "info");
-				} else if (result.action === "resumed" && result.topicName) {
-					notify(`Telegram: resumed topic "${result.topicName}"`, "info");
-				}
-			}
-		},
-		onChatLock: () => {
-			// In topic mode, the chat ID is known from pairing - no lock needed
-			// In non-topic mode, locking still useful for single-session flow
-			if (state.topicsEnabled) {
-				state.bridge?.setTopicsEnabled(true, state.config.allowedUserId);
-			}
-			updateStatus();
-		},
-		onChatUnlock: () => {
-			updateStatus();
-		},
-	});
+	// Register the accept callback for incoming.ts
+	setAcceptCallback(onAccept);
 
 	// Pre-create the topic manager if we already know the chat ID (from a paired user)
 	if (state.topicsEnabled && state.config.allowedUserId) {
-		state.bridge?.setTopicsEnabled(true, state.config.allowedUserId);
+		setTopicsEnabled(true, state.config.allowedUserId);
 	}
 
 	// Lock to the paired user's chat immediately if we know the ID.
 	// Without this, TUI-originated turns have no activeChatId and outgoing
 	// messages are silently dropped until the first Telegram message arrives.
 	if (state.config.allowedUserId) {
-		state.bridge.lockToChat(state.config.allowedUserId);
+		lockToChat(state.config.allowedUserId);
 	}
 
 	// ── Relay election: try to become the poller ──────────────────────────
@@ -141,11 +135,11 @@ export async function disconnect(ctx: ExtensionCommandContext | ExtensionContext
 		state.relayClient?.disconnect();
 		state.relayClient = undefined;
 	}
-	state.bridge?.stopTypingIndicator();
-	state.bridge?.unlock();
-	// Clear runtime state - after disconnect, bridge and API are stale
+	stopTypingIndicator();
+	unlockChat();
+	// Clear runtime state - after disconnect, API is stale
 	state.api = undefined;
-	state.bridge = undefined;
+	state.topicManager = undefined;
 	state.polling = undefined;
 	state.botUsername = undefined;
 	state.topicsEnabled = false;
@@ -176,11 +170,11 @@ export async function shutdown(): Promise<void> {
 		state.relayClient?.disconnect();
 		state.relayClient = undefined;
 	}
-	state.bridge?.stopTypingIndicator();
-	state.bridge?.unlock();
+	stopTypingIndicator();
+	unlockChat();
 	// Clear runtime state
 	state.api = undefined;
-	state.bridge = undefined;
+	state.topicManager = undefined;
 	state.polling = undefined;
 	state.botUsername = undefined;
 	// Persist polling cursor so we resume cleanly
@@ -257,7 +251,7 @@ async function startAsRelay(): Promise<void> {
 			// Process locally ONLY if no client owns this thread.
 			// my_chat_member updates are always processed locally (handled inside shouldSkipLocal).
 			if (!state.relayServer?.shouldSkipLocal(update)) {
-				await state.bridge?.handleUpdate(update);
+				await handleIncomingUpdate(update);
 			}
 
 			// Broadcast cursor so clients can save it for failover
@@ -295,12 +289,12 @@ async function startAsClient(): Promise<void> {
 	state.relayClient = new RelayClient();
 
 	const connected = await state.relayClient.connect(
-		// onUpdate: process routed updates through the bridge
+		// onUpdate: process routed updates
 		async (update) => {
 			if (update.update_id >= (state.lastUpdateId ?? 0)) {
 				state.lastUpdateId = update.update_id + 1;
 			}
-			await state.bridge?.handleUpdate(update);
+			await handleIncomingUpdate(update);
 		},
 		// onDisconnect: attempt failover
 		async () => {
@@ -357,7 +351,7 @@ async function attemptFailover(): Promise<void> {
 					if (update.update_id >= (state.lastUpdateId ?? 0)) {
 						state.lastUpdateId = update.update_id + 1;
 					}
-					await state.bridge?.handleUpdate(update);
+					await handleIncomingUpdate(update);
 				},
 				async () => {
 					await attemptFailover();
@@ -379,11 +373,6 @@ async function attemptFailover(): Promise<void> {
 }
 
 // ── Internal Helpers ─────────────────────────────────────────────────────────
-
-/** Called when bridge state changes (pairing, chat lock/unlock). */
-function onBridgeStateChange(): void {
-	updateStatus();
-}
 
 /** Show the connected notification with topics and mode info. */
 function notifyConnected(): void {

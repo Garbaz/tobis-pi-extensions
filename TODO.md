@@ -47,15 +47,18 @@ Open questions:
 - Binary vs text? Send text files as documents with syntax-highlighted captions?
 - Deduplication in a single turn? If the agent edits the same file 3 times, send only the final version?
 
-### Bridge dissolution (in progress)
+### Bridge dissolution
 
-The `TelegramBridge` class still has too many responsibilities: incoming message handling, outgoing dispatch delegation, session registration, topic management delegation, callback dispatch, turn context tracking, and reaction tracking. Most of these can move to more focused modules:
-
-- Incoming routing → `incoming.ts` (already partially there via `handleUpdate`)
-- Outgoing dispatch → `SessionHandle.outgoing` (already in registry)
-- Session registration → `SessionRegistry` + `connection.ts`
-- Turn context → could move to `incoming.ts` or a thin wrapper
-- Callback dispatch → could stay in bridge or move to its own module
+**Completed.** The `TelegramBridge` class has been dissolved. Responsibilities moved to:
+- Incoming routing → `incoming.ts` (`handleIncomingUpdate`)
+- Outgoing dispatch → `state.ts` (dispatch helpers over active session's outgoing handler)
+- Session registration → `session.ts` (`registerSession`, `restoreSession`, `unregisterSession`)
+- Turn context → `state.ts` (`lastTelegramContext`, `consumeTelegramContext`)
+- Callback dispatch → `state.ts` (`registerCallbackHandler`, `dispatchCallbackQuery`)
+- Instance state → `state.ts` (`activeChatId`, `topicManager`, `callbackHandlers`)
+- Topics control → `session.ts` (`setTopicsEnabled`)
+- Accept callback → `incoming.ts` (`setAcceptCallback`)
+- `bridge.ts` deleted.
 
 ### Session commands scattered
 

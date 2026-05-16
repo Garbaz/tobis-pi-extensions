@@ -3,11 +3,10 @@
 // All business logic lives in dedicated modules:
 //   state.ts      - shared mutable state (per-execution + per-session)
 //   connection.ts - connect, disconnect, relay, failover
-//   session.ts    - session labels, topic setup, auto-rename
-//   prompt.ts     - system prompt injection for Telegram turns
-//   bridge.ts     - incoming/outgoing message orchestration
 //   incoming.ts   - Telegram → Pi message handling
 //   outgoing.ts   - Pi → Telegram message handling
+//   session.ts    - session labels, topic setup, auto-rename
+//   prompt.ts     - system prompt injection for Telegram turns
 //   topics.ts     - forum topic manager
 //   relay.ts      - multi-instance relay (server + client)
 //   api.ts        - Telegram Bot API client
@@ -58,7 +57,7 @@ interface ToolExecutionEndEvent {
 }
 import { registerTools } from "./tools.js";
 import { readSessionData } from "./topics.js";
-import { state, isTelegramConnected, updateStatus, initSession, removeSession, activateSession, currentSession, refreshSessionCtx } from "./state.js";
+import { state, isTelegramConnected, updateStatus, initSession, removeSession, activateSession, currentSession, refreshSessionCtx, getActiveChatId, consumeTelegramContext, startTypingIndicator, stopTypingIndicator, dispatchAgentEnd, dispatchMessageUpdate, dispatchToolStart, dispatchToolEnd, sendUserEcho } from "./state.js";
 import { connect, disconnect, shutdown } from "./connection.js";
 import { readConfig, updateConfig, saveConfigField, allowUser, blockUser, validateMediaConfig } from "./config.js";
 import { setupSessionTopic, teardownSession, renameTopicFromMessage, type SessionStartReason } from "./session.js";
@@ -181,7 +180,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 					await saveConfigField("topics", state.config.topics);
 				}
 				state.topicsEnabled = state.config.topics !== false;
-				if (state.bridge) state.bridge.setTopicsEnabled(state.topicsEnabled);
+				if (state.topicManager) state.topicManager.setTopicsEnabled(state.topicsEnabled);
 				ctx.ui.notify(`Telegram: topics ${state.config.topics !== false ? "enabled" : "disabled"}. Reconnect to apply.`, "info");
 				break;
 			}
@@ -401,7 +400,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 
 		// Activate the correct session's outgoing handler for this turn
 		activateSession(sessionId);
-		state.bridge?.startTypingIndicator(ctx);
+		startTypingIndicator(ctx);
 	});
 
 	// Inject telegram context into system prompt - only on Telegram-originated turns
@@ -417,7 +416,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		// Activate the correct session for this turn
 		activateSession(sessionId);
 
-		const telegramCtx = state.bridge?.consumeTelegramContext();
+		const telegramCtx = consumeTelegramContext();
 		if (!telegramCtx) return; // this turn didn't come from telegram
 
 		return { systemPrompt: event.systemPrompt + buildTelegramPromptSuffix(telegramCtx) };
@@ -430,8 +429,8 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		// Refresh ctx in session map for long-lived callbacks
 		refreshSessionCtx(sessionId, ctx);
 
-		state.bridge?.stopTypingIndicator();
-		await state.bridge?.onAgentEnd(event, ctx);
+		stopTypingIndicator();
+		await dispatchAgentEnd(event, ctx);
 	});
 
 	extensionApi.on("message_update", async (event: MessageUpdateEvent, ctx: ExtensionContext) => {
@@ -441,7 +440,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		// Refresh ctx in session map for long-lived callbacks
 		refreshSessionCtx(sessionId, ctx);
 
-		await state.bridge?.onMessageUpdate(event, ctx);
+		await dispatchMessageUpdate(event, ctx);
 	});
 
 	// Echo TUI-originated user messages to Telegram
@@ -456,8 +455,8 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		// Rename topic from CWD basename to "basename · snippet" on first user message
 		void renameTopicFromMessage(event.text).catch(() => {});
 
-		if (event.source === "interactive" && state.bridge?.getActiveChatId()) {
-			void state.bridge.sendUserEcho(event.text).catch(() => {});
+		if (event.source === "interactive" && getActiveChatId()) {
+			void sendUserEcho(event.text).catch(() => {});
 		}
 	});
 
@@ -469,8 +468,8 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		// Refresh ctx in session map for long-lived callbacks
 		refreshSessionCtx(sessionId, ctx);
 
-		if (state.bridge?.getActiveChatId()) {
-			await state.bridge.onToolExecutionStart(event.toolName, event.args as Record<string, unknown>);
+		if (getActiveChatId()) {
+			await dispatchToolStart(event.toolName, event.args as Record<string, unknown>);
 		}
 	});
 
@@ -481,8 +480,8 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		// Refresh ctx in session map for long-lived callbacks
 		refreshSessionCtx(sessionId, ctx);
 
-		if (state.bridge?.getActiveChatId()) {
-			state.bridge.onToolExecutionEnd(event.toolName, {}, event.isError);
+		if (getActiveChatId()) {
+			dispatchToolEnd(event.toolName, {}, event.isError);
 		}
 	});
 

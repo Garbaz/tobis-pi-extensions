@@ -7,39 +7,30 @@
 // safeCtx(currentSession()?.ctx) with stderr fallback via notify().
 // Pi API calls (sendUserMessage) go through state.pi which is process-lifetime.
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TelegramApi } from "./api.js";
 import type { Message, CallbackQuery, ChatMemberUpdated, Update, TelegramConfig, MediaType } from "./types.js";
-import { formatIncomingText, extractText, formatLocation, formatVenue, formatContact, formatDice, formatPoll, mediaEmoji, mediaLabel } from "./formatting.js";
+import { formatIncomingText, extractText, detectContentTypes, senderName, mediaEmoji, mediaLabel, formatLocation, formatVenue, formatContact, formatDice, formatPoll } from "./formatting.js";
 import { getMediaDir, getMediaInfo, downloadMediaFile, processMedia, truncateProcessorOutput, mediaPlaceholder } from "./media.js";
 import { checkUserAuth } from "./config.js";
-import { state, currentSession, safeCtx, notify } from "./state.js";
+import { state, currentSession, safeCtx, notify, getActiveChatId, lockToChat, unlockChat, consumeTelegramContext, dispatchCallbackQuery } from "./state.js";
+import { OutgoingHandler } from "./outgoing.js";
 import { ensureTopicCreated } from "./session.js";
 import { createLogger, notifyError } from "./log.js";
 const log = createLogger("incoming");
 import type { PendingUser } from "./state.js";
 
-// ── Incoming Context ─────────────────────────────────────────────────────────
-// Bundle of bridge-internal state that incoming.ts needs.
-// Constructed once by the bridge and passed to handleUpdate on every call.
-// No ctx stored here - ctx is accessed via currentSession()?.ctx.
+// ── Accept Callback ──────────────────────────────────────────────────────────
+// Registered by connection.ts during connect(). Called when a user is accepted
+// (first authorized message or /telegram allow).
 
-/** Dependencies that incoming.ts needs from the bridge. */
-export interface IncomingDeps {
-	/** Telegram Bot API client. */
-	api: TelegramApi;
-	/** Current config (mutable reference - pairing mutates allowedUserId). */
-	config: TelegramConfig;
-	/** Pi extension API for sending messages. */
-	pi: ExtensionAPI;
-	/** Currently locked chat ID, or undefined if not locked. */
-	activeChatId: number | undefined;
-	/** Lock the bridge to a specific chat. */
-	lockToChat: (chatId: number) => void;
-	/** Unlock the bridge from the current chat. */
-	unlock: () => void;
-	/** Called when a user is accepted (from whitelist or first auto-pair). */
-	onAccept: (userId: number, userName: string) => void | Promise<void>;
+type AcceptCallback = (userId: number, userName: string) => void | Promise<void>;
+
+let _onAccept: AcceptCallback | undefined;
+
+/** Register the accept callback (called once from connection.ts during connect). */
+export function setAcceptCallback(cb: AcceptCallback): void {
+	_onAccept = cb;
 }
 
 // ── Result Types ─────────────────────────────────────────────────────────────
@@ -60,20 +51,63 @@ export interface IncomingResult {
 }
 
 // ── Update Handler ───────────────────────────────────────────────────────────
+// handleIncomingUpdate is the entry point from connection.ts for all incoming
+// Telegram updates. It:
+// 1. Dispatches callback queries to registered handlers
+// 2. Delegates to handleMessage for text/media messages
+// 3. Routes the message to the correct session (General → thread echo)
+// 4. Sets reaction on the user message
+// 5. Stores turn context for system prompt injection
 
-/** Handle an incoming Telegram update. */
-export async function handleUpdate(
-	update: Update,
-	deps: IncomingDeps,
-): Promise<IncomingResult | undefined> {
+/** Handle an incoming Telegram update (entry point from connection.ts). */
+export async function handleIncomingUpdate(update: Update): Promise<void> {
+	// 1. Dispatch callback queries first
+	if (update.callback_query) {
+		const consumed = await dispatchCallbackQuery(update.callback_query);
+		if (consumed) return;
+		// Unhandled - answer generically
+		if (state.api) {
+			try {
+				await state.api.answerCallbackQuery({ callback_query_id: update.callback_query.id, text: "Received" });
+			} catch { /* non-critical */ }
+		}
+		return;
+	}
+
+	// 2. Process the message
+	const result = await processUpdate(update);
+
+	if (result) {
+		const msg = (update.message || update.edited_message) as Message | undefined;
+
+		// 3. Route to the correct session's outgoing handler
+		const echoMessageId = await routeToSession(msg, result.chatId);
+
+		// 4. Set reaction and track for completion
+		trackUserMessage(result.chatId, echoMessageId ?? result.messageId);
+
+		// 5. Store turn context for system prompt injection
+		if (msg) {
+			state.lastTelegramContext = {
+				username: senderName(msg),
+				types: detectContentTypes(msg),
+				unprocessed: result.unprocessed,
+			};
+		}
+	}
+}
+
+/** Process a Telegram update, returning result info if it produced a forwarded message. */
+async function processUpdate(update: Update): Promise<IncomingResult | undefined> {
 	if (update.message) {
-		return await handleMessage(update.message, deps);
+		return await handleMessage(update.message);
 	} else if (update.edited_message) {
-		return await handleMessage(update.edited_message, deps, true);
+		return await handleMessage(update.edited_message, true);
 	} else if (update.callback_query) {
-		await handleCallbackQuery(update.callback_query, deps.api);
+		// Handled above in handleIncomingUpdate
+		return undefined;
 	} else if (update.my_chat_member) {
-		await handleChatMemberUpdate(update.my_chat_member, deps.activeChatId, deps.unlock);
+		await handleChatMemberUpdate(update.my_chat_member);
 	}
 	return undefined;
 }
@@ -81,10 +115,12 @@ export async function handleUpdate(
 /** Handle a Telegram message. Returns chat+message IDs for reaction tracking. */
 async function handleMessage(
 	message: Message,
-	deps: IncomingDeps,
 	isEdit = false,
 ): Promise<IncomingResult | undefined> {
-	const { api, config, pi, activeChatId, lockToChat, onAccept } = deps;
+	const api = state.api;
+	const config = state.config;
+	const pi = state.pi;
+	if (!api || !pi) return undefined;
 
 	log.debug({ from: message.from?.id, threadId: message.message_thread_id }, "handleMessage");
 
@@ -140,10 +176,11 @@ async function handleMessage(
 	// Auto-lock on first authorized message (no allowedUserId set yet)
 	if (config.allowedUserId === undefined) {
 		config.allowedUserId = message.from.id;
-		await onAccept(message.from.id, message.from.first_name);
+		if (_onAccept) await _onAccept(message.from.id, message.from.first_name);
 	}
 
 	// Session lock check
+	const activeChatId = state.activeChatId;
 	if (activeChatId !== undefined && message.chat.id !== activeChatId) {
 		await api.sendMessage({
 			chat_id: message.chat.id,
@@ -428,20 +465,99 @@ async function formatMessageContent(
 	return { text: formatIncomingText("[unsupported message type]", isEdit), unprocessed };
 }
 
-/** Handle callback query (inline keyboard button press). */
-async function handleCallbackQuery(query: CallbackQuery, api: TelegramApi): Promise<void> {
-	await api.answerCallbackQuery({
-		callback_query_id: query.id,
-		text: "Received",
-	});
+/** Handle chat member update (bot added/removed). */
+async function handleChatMemberUpdate(update: ChatMemberUpdated): Promise<void> {
+	if (update.new_chat_member.status === "kicked" || update.new_chat_member.status === "left") {
+		if (state.activeChatId === update.chat.id) {
+			unlockChat();
+		}
+	}
 }
 
-/** Handle chat member update (bot added/removed). */
-async function handleChatMemberUpdate(update: ChatMemberUpdated, activeChatId: number | undefined, unlock: () => void): Promise<void> {
-	if (update.new_chat_member.status === "kicked" || update.new_chat_member.status === "left") {
-		if (activeChatId === update.chat.id) {
-			unlock();
+// ── Routing ──────────────────────────────────────────────────────────────────
+
+/** Route an incoming message to the correct session's outgoing handler.
+ *  For General topic messages, echoes into the session thread and adds a
+ *  reaction on the original to signal routing.
+ *  Returns the echo message ID (if echoed), or undefined. */
+async function routeToSession(msg: Message | undefined, chatId: number): Promise<number | undefined> {
+	if (!msg || !state.api) return undefined;
+
+	const handle = state.registry.getByThread(msg.message_thread_id);
+	const isGeneralTopic = !msg.message_thread_id;
+
+	if (handle) {
+		state.registry.setActive(handle.sessionId);
+		return undefined;
+	} else if (isGeneralTopic && state.topicManager) {
+		// Message in General topic - route to current session and echo into the thread
+		const activeHandle = state.registry.getActive();
+		if (!activeHandle) return undefined;
+
+		state.registry.setActive(activeHandle.sessionId);
+
+		const outgoing = activeHandle.outgoing;
+		if (!outgoing) return undefined;
+
+		// Get text from the General-topic message for echoing
+		const text = extractText(msg);
+		if (!text) {
+			// Media-only message - send a generic echo so the reply chain is in the right thread
+			const types = detectContentTypes(msg);
+			const label = types.length > 0 ? types[0] : "message";
+			try {
+				const echoMsg = await state.api.sendMessage({
+					chat_id: chatId,
+					text: `\u{1F464} [${label}]`,
+					message_thread_id: outgoing.getThreadId(),
+					disable_notification: true,
+				});
+
+				// React to the General-topic message to signal routing
+				void state.api.setMessageReaction({
+					chat_id: chatId,
+					message_id: msg.message_id,
+					reaction: [{ type: "emoji", emoji: "\u{1F440}" }],
+				}).catch(() => { /* non-critical */ });
+
+				return echoMsg.message_id;
+			} catch {
+				return undefined;
+			}
 		}
+
+		try {
+			const echoMsg = await state.api.sendMessage({
+				chat_id: chatId,
+				text: `\u{1F464} ${text}`,
+				message_thread_id: outgoing.getThreadId(),
+				disable_notification: true,
+			});
+
+			// React to the General-topic message to signal routing (silent, no text clutter)
+			void state.api.setMessageReaction({
+				chat_id: chatId,
+				message_id: msg.message_id,
+				reaction: [{ type: "emoji", emoji: "\u{1F440}" }],
+			}).catch(() => { /* non-critical */ });
+
+			return echoMsg.message_id;
+		} catch {
+			// Non-critical - echo is best-effort
+			return undefined;
+		}
+	}
+	return undefined;
+}
+
+// ── Tracking ─────────────────────────────────────────────────────────────────
+
+/** Set reaction on user message and track it for completion reaction. */
+function trackUserMessage(chatId: number, messageId: number): void {
+	const outgoing = state.registry.getActive()?.outgoing;
+	if (outgoing) {
+		void outgoing.setReaction(chatId, messageId, "\u{23F3}").catch(() => {});
+		outgoing.setLastUserMessage(chatId, messageId);
 	}
 }
 
@@ -455,7 +571,7 @@ async function sendHelpMessage(api: TelegramApi, chatId: number, replyToId?: num
 	});
 }
 
-async function sendStatusMessage(api: TelegramApi, chatId: number, ctx: ExtensionContext | undefined, replyToId?: number): Promise<void> {
+async function sendStatusMessage(api: TelegramApi, chatId: number, ctx: import("@earendil-works/pi-coding-agent").ExtensionContext | undefined, replyToId?: number): Promise<void> {
 	const lines: string[] = [];
 	if (ctx) {
 		try {

@@ -15,7 +15,7 @@ The telegram extension operates across two layers. The relay is a role, not a se
 
 | Layer | Scope | Lifetime | Key State |
 |-------|-------|----------|-----------|
-| **Instance** | Pi process | Process-lifetime (pi start to pi quit) | `TelegramState` (api, bridge, config, pendingUsers, registry), relay role (RelayServer/Client, polling) |
+| **Instance** | Pi process | Process-lifetime (pi start to pi quit) | `TelegramState` (api, config, pendingUsers, registry, topicManager, activeChatId), relay role (RelayServer/Client, polling) |
 | **Session** | Pi session | Session-lifetime (/new, /resume, /fork, /reload) | `SessionHandle` (sessionId, sessionFile, threadId, topicName, topicRenamed, outgoing, ctx) |
 
 Session state lives in `SessionRegistry` (process-lifetime container, session-lifetime handles). The registry owns the threadId↔sessionId reverse mapping and active session tracking. `TopicManager` handles Telegram API calls (create/restore/close/rename topics) but delegates routing to the registry.
@@ -29,9 +29,9 @@ Session state lives in `SessionRegistry` (process-lifetime container, session-li
 | `session_start(reason=resume)` | Auto-connect if `connected: true` in session data. Resume existing topic. |
 | `session_start(reason=reload)` | Auto-connect if `connected: true`. Resume existing topic. |
 | `session_start(reason=fork)` | **Open question** -- see TODO.md. Currently: no auto-connect. |
-| `session_shutdown(reason=quit)` | Full teardown: close topic, disconnect bridge, stop polling/relay, flush logs. |
-| `session_shutdown(reason=reload)` | Close topic, unsubscribe from relay. Bridge and polling survive (re-used by next session_start). |
-| `session_shutdown(reason=new)` | Close topic, unsubscribe from relay. Bridge and polling survive. |
+| `session_shutdown(reason=quit)` | Full teardown: close topic, disconnect, stop polling/relay, flush logs. |
+| `session_shutdown(reason=reload)` | Close topic, unsubscribe from relay. API and polling survive (re-used by next session_start). |
+| `session_shutdown(reason=new)` | Close topic, unsubscribe from relay. API and polling survive. |
 | `session_shutdown(reason=fork)` | **Open question** -- see TODO.md. Currently: same as new. |
 
 ### Bot Command Layer
@@ -49,7 +49,7 @@ Each bot command should clearly belong to a layer:
 
 ### Telegram-Originated vs TUI Turns
 
-The agent adapts behavior based on turn source (e.g. shorter responses, media awareness). This is communicated via a system prompt suffix: the bridge sets `_lastTelegramContext` on incoming messages, and `before_agent_start` consumes it and clears the flag. Features that should work regardless of source (like topic renaming) must NOT be on the Telegram-only path -- they belong in Pi events that fire for all input (e.g. `input` event).
+The agent adapts behavior based on turn source (e.g. shorter responses, media awareness). This is communicated via a system prompt suffix: the incoming handler sets `state.lastTelegramContext` on incoming messages, and `before_agent_start` consumes it via `consumeTelegramContext()` and clears the flag. Features that should work regardless of source (like topic renaming) must NOT be on the Telegram-only path -- they belong in Pi events that fire for all input (e.g. `input` event).
 
 Telegram-originated messages are NOT prefixed with `[telegram]` in the agent input. The source is communicated exclusively through the system prompt injection, keeping the agent's context clean.
 

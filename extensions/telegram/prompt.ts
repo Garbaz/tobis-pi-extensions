@@ -2,7 +2,7 @@
 // Constructs the system prompt suffix injected on Telegram-originated turns.
 // Tells the agent the message source, media processing state, and available tools.
 
-import type { TelegramTurnContext } from "./bridge.js";
+import type { TelegramTurnContext } from "./state.js";
 import type { MediaType } from "./types.js";
 
 /** Build the system prompt suffix for a Telegram-originated turn.
