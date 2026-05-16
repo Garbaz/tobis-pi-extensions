@@ -3,8 +3,9 @@
 //
 // Pi's TUI renders stdout/stderr directly — NEVER use console.* or
 // process.stdout in production code. Use the pino loggers for persistent
-// debug/info/warn traces, and notify()/notifyWarn()/notifyError() for
-// user-visible messages (which go through ctx.ui.notify with stderr fallback).
+// debug/info/warn traces, and notify()/notifyError()/notifyWarn() from
+// state.js for user-visible messages (which go through ctx.ui.notify
+// with stderr fallback).
 //
 // Log file: <agentDir>/run/telegram/log.jsonl  (NDJSON, one object per line)
 // Level control: PI_TELEGRAM_LOG env var
@@ -22,7 +23,6 @@
 
 import pino, { type Logger, type Level } from "pino";
 import { LOG_PATH, ensureRunDirSync } from "./paths.js";
-import { notify, updateStatus } from "./state.js";
 
 // ── Env var parsing ──────────────────────────────────────────────────────────
 
@@ -117,19 +117,4 @@ process.on("beforeExit", () => {
 	}
 });
 
-// ── User-facing notifications ────────────────────────────────────────────────
-// These go through Pi's UI notification system, NOT through pino.
-// They are for messages the user should see in the TUI.
 
-/** Show an error notification to the user.
- *  Uses currentSession()?.ctx if available, falls back to stderr. */
-export function notifyError(message: string): void {
-	notify(`Telegram: ${message}`, "error");
-	updateStatus(message);
-}
-
-/** Show a warning notification to the user.
- *  Uses currentSession()?.ctx if available, falls back to stderr. */
-export function notifyWarn(message: string): void {
-	notify(`Telegram: ${message}`, "warning");
-}

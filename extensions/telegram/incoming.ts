@@ -13,12 +13,11 @@ import type { Message, CallbackQuery, ChatMemberUpdated, Update, TelegramConfig,
 import { formatIncomingText, extractText, detectContentTypes, senderName, mediaEmoji, mediaLabel, formatLocation, formatVenue, formatContact, formatDice, formatPoll } from "./formatting.js";
 import { getMediaDir, getMediaInfo, downloadMediaFile, processMedia, truncateProcessorOutput, mediaPlaceholder } from "./media.js";
 import { checkUserAuth } from "./config.js";
-import { state, currentSession, safeCtx, notify, getActiveChatId, lockToChat, unlockChat, consumeTelegramContext, dispatchCallbackQuery } from "./state.js";
+import { state, currentSession, safeCtx, notify, getActiveChatId, lockToChat, unlockChat, consumeTelegramContext, dispatchCallbackQuery, type PendingUser, notifyError } from "./state.js";
 import { OutgoingHandler } from "./outgoing.js";
 import { ensureTopicCreated } from "./session.js";
-import { createLogger, notifyError } from "./log.js";
+import { createLogger } from "./log.js";
 const log = createLogger("incoming");
-import type { PendingUser } from "./state.js";
 
 // ── Accept Callback ──────────────────────────────────────────────────────────
 // Registered by connection.ts during connect(). Called when a user is accepted

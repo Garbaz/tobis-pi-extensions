@@ -5,7 +5,8 @@
 
 import type { TelegramApi } from "./api.js";
 import type { ForumTopic } from "./types.js";
-import { createLogger, notifyWarn } from "./log.js";
+import { createLogger } from "./log.js";
+import { notifyWarn } from "./state.js";
 const log = createLogger("topic");
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";

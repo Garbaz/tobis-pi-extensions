@@ -13,7 +13,6 @@ import type { TelegramApi } from "./api.js";
 import { convertToHtml, splitMessage, MAX_MESSAGE_LENGTH, escapeHtml } from "./markdown.js";
 import type { PendingFile } from "./tools.js";
 import { flushPendingFiles } from "./tools.js";
-import { ensureTopicCreated } from "./session.js";
 
 // ── Tool input formatting ───────────────────────────────────────────────────
 //
@@ -265,12 +264,6 @@ export class OutgoingHandler {
 	/** Called on agent_end: finalize turn, send formatted response, flush files, set reaction. */
 	async onAgentEnd(_event: { messages: unknown[] }, _ctx: ExtensionContext): Promise<void> {
 		this.stopTypingIndicator();
-
-		// Ensure forum topic exists (fallback in case it wasn't created on connect)
-		const threadId = await ensureTopicCreated();
-		if (threadId !== undefined && this.threadId === undefined) {
-			this.threadId = threadId;
-		}
 
 		// Finalize any remaining streaming text
 		if (this.currentStreamingText.trim()) {
@@ -537,12 +530,6 @@ export class OutgoingHandler {
 	async sendUserEcho(text: string): Promise<void> {
 		if (!this.activeChatId) return;
 
-		// Ensure forum topic exists (fallback in case it wasn't created on connect)
-		const threadId = await ensureTopicCreated();
-		if (threadId !== undefined && this.threadId === undefined) {
-			this.threadId = threadId;
-		}
-
 		try {
 			await this.api.sendMessage({
 				chat_id: this.activeChatId,
@@ -566,12 +553,6 @@ export class OutgoingHandler {
 	/** Send or edit the streaming preview message. */
 	private async sendOrEditPreview(text: string): Promise<void> {
 		if (!this.activeChatId) return;
-
-		// Ensure forum topic exists (fallback in case it wasn't created on connect)
-		const threadId = await ensureTopicCreated();
-		if (threadId !== undefined && this.threadId === undefined) {
-			this.threadId = threadId;
-		}
 
 		const previewText = text.length > MAX_MESSAGE_LENGTH
 			? text.slice(0, MAX_MESSAGE_LENGTH - 20) + "\n\u{2026}[truncated]"

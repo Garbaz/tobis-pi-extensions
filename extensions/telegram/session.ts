@@ -7,9 +7,8 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { OutgoingHandler } from "./outgoing.js";
 import { TopicManager } from "./topics.js";
 import { readSessionData, saveSessionFields } from "./topics.js";
-import { state, currentSession, activateSession, getActiveChatId, notify } from "./state.js";
+import { state, currentSession, activateSession, getActiveChatId, notify, subscribeThread, unsubscribeThread } from "./state.js";
 import { createLogger } from "./log.js";
-import { subscribeThread, unsubscribeThread } from "./connection.js";
 const log = createLogger("session");
 
 // ── Topic Icon Colors ─────────────────────────────────────────────────────────

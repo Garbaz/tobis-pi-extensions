@@ -12,9 +12,9 @@ import { saveConfigField, readLastUpdateId, saveLastUpdateId, allowUser } from "
 import { RelayServer, RelayClient } from "./relay.js";
 import { tryAcquireRelayLock, releaseRelayLock } from "./relay-lock.js";
 import { handleIncomingUpdate, setAcceptCallback } from "./incoming.js";
-import { createLogger, flushLogs, notifyError, notifyWarn } from "./log.js";
+import { createLogger, flushLogs } from "./log.js";
 const log = createLogger("lifecycle");
-import { state, updateStatus, notify, currentSession, safeCtx, lockToChat, unlockChat, stopTypingIndicator } from "./state.js";
+import { state, updateStatus, notify, currentSession, safeCtx, lockToChat, unlockChat, stopTypingIndicator, setSubscriptionCallbacks, clearSubscriptionCallbacks, notifyError, notifyWarn } from "./state.js";
 import { setupSessionTopic, setTopicsEnabled } from "./session.js";
 import { saveSessionFields } from "./topics.js";
 
@@ -92,6 +92,11 @@ export async function connect(ctx: ExtensionCommandContext | ExtensionContext): 
 	// Register the accept callback for incoming.ts
 	setAcceptCallback(onAccept);
 
+	// Register thread subscription callbacks so session.ts can
+	// subscribe/unsubscribe threads without importing connection.ts
+	const { subscribe, unsubscribe } = createSubscriptionCallbacks();
+	setSubscriptionCallbacks(subscribe, unsubscribe);
+
 	// Pre-create the topic manager if we already know the chat ID (from a paired user)
 	if (state.topicsEnabled && state.config.allowedUserId) {
 		setTopicsEnabled(true, state.config.allowedUserId);
@@ -137,6 +142,7 @@ export async function disconnect(ctx: ExtensionCommandContext | ExtensionContext
 	}
 	stopTypingIndicator();
 	unlockChat();
+	clearSubscriptionCallbacks();
 	// Clear runtime state - after disconnect, API is stale
 	state.api = undefined;
 	state.topicManager = undefined;
@@ -172,6 +178,7 @@ export async function shutdown(): Promise<void> {
 	}
 	stopTypingIndicator();
 	unlockChat();
+	clearSubscriptionCallbacks();
 	// Clear runtime state
 	state.api = undefined;
 	state.topicManager = undefined;
@@ -187,27 +194,28 @@ export async function shutdown(): Promise<void> {
 }
 
 // ── Thread Subscription ─────────────────────────────────────────────────────
-// Subscribes/unsubscribes to updates for a specific forum topic thread.
-// As relay: registers the thread locally so shouldSkipLocal() and routeUpdate()
-//           know this instance owns the thread.
-// As client: sends sub/unsub to the relay server so updates are routed to us.
+// Subscription callbacks registered in state.ts (set by connect(), cleared by
+// disconnect/shutdown). session.ts calls subscribeThread/unsubscribeThread
+// from state.ts, which dispatches here via the callback.
 
-/** Subscribe to updates for a thread. Dispatches to relay server or client. */
-export function subscribeThread(threadId: number, sessionId: string): void {
-	if (state.isRelay) {
-		state.relayServer?.subscribeLocal(threadId);
-	} else if (state.relayClient?.isConnected()) {
-		state.relayClient.subscribe(threadId, sessionId);
-	}
-}
-
-/** Unsubscribe from updates for a thread. Dispatches to relay server or client. */
-export function unsubscribeThread(threadId: number): void {
-	if (state.isRelay) {
-		state.relayServer?.unsubscribeLocal(threadId);
-	} else if (state.relayClient?.isConnected()) {
-		state.relayClient.unsubscribe(threadId);
-	}
+/** Create the subscription callback implementations.
+ *  Called by connect() to register them in state.ts. */
+function createSubscriptionCallbacks() {
+	const subscribe = (threadId: number, sessionId: string): void => {
+		if (state.isRelay) {
+			state.relayServer?.subscribeLocal(threadId);
+		} else if (state.relayClient?.isConnected()) {
+			state.relayClient.subscribe(threadId, sessionId);
+		}
+	};
+	const unsubscribe = (threadId: number): void => {
+		if (state.isRelay) {
+			state.relayServer?.unsubscribeLocal(threadId);
+		} else if (state.relayClient?.isConnected()) {
+			state.relayClient.unsubscribe(threadId);
+		}
+	};
+	return { subscribe, unsubscribe };
 }
 
 // ── Relay Start ──────────────────────────────────────────────────────────────

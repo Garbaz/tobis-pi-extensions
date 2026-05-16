@@ -298,7 +298,40 @@ export function removeSession(sessionId: string): void {
 	state.registry.unregister(sessionId);
 }
 
-// ── Re-exports for convenience ────────────────────────────────────────────────
+// ── Thread Subscription Callbacks ────────────────────────────────────────────
+// Set by connection.ts during connect(). Called by session.ts when
+// registering/restoring/unregistering sessions. This breaks the
+// session.ts <-> connection.ts circular dependency.
+
+/** Subscribe to updates for a thread. Dispatches to relay server or client. */
+let _subscribeThread: ((threadId: number, sessionId: string) => void) | undefined;
+/** Unsubscribe from updates for a thread. */
+let _unsubscribeThread: ((threadId: number) => void) | undefined;
+
+/** Register subscription callbacks (called by connection.ts during connect). */
+export function setSubscriptionCallbacks(
+	subscribe: (threadId: number, sessionId: string) => void,
+	unsubscribe: (threadId: number) => void,
+): void {
+	_subscribeThread = subscribe;
+	_unsubscribeThread = unsubscribe;
+}
+
+/** Clear subscription callbacks (called by connection.ts during disconnect/shutdown). */
+export function clearSubscriptionCallbacks(): void {
+	_subscribeThread = undefined;
+	_unsubscribeThread = undefined;
+}
+
+/** Subscribe to updates for a thread. No-op if callbacks not set (not connected). */
+export function subscribeThread(threadId: number, sessionId: string): void {
+	_subscribeThread?.(threadId, sessionId);
+}
+
+/** Unsubscribe from updates for a thread. No-op if callbacks not set (not connected). */
+export function unsubscribeThread(threadId: number): void {
+	_unsubscribeThread?.(threadId);
+}
 // Callers that need SessionHandle type or advanced registry operations
 // can import from session-registry.ts directly.
 
@@ -397,4 +430,20 @@ export function updateStatus(error?: string): void {
 	}
 	// Connected and paired - clear status, no footer line needed
 	ctx.ui.setStatus("telegram", undefined);
+}
+
+// ── Convenience notifications ─────────────────────────────────────────────────
+// Thin wrappers over notify()/updateStatus() with Telegram: prefix.
+
+/** Show an error notification to the user.
+ *  Uses currentSession()?.ctx if available, falls back to stderr. */
+export function notifyError(message: string): void {
+	notify(`Telegram: ${message}`, "error");
+	updateStatus(message);
+}
+
+/** Show a warning notification to the user.
+ *  Uses currentSession()?.ctx if available, falls back to stderr. */
+export function notifyWarn(message: string): void {
+	notify(`Telegram: ${message}`, "warning");
 }

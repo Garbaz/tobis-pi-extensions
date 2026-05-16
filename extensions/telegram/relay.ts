@@ -16,7 +16,8 @@ import { createServer, createConnection, type Server, type Socket } from "node:n
 import { unlink } from "node:fs/promises";
 import type { Update, Message } from "./types.js";
 import { RELAY_SOCKET_PATH, ensureRunDir } from "./paths.js";
-import { createLogger, notifyError } from "./log.js";
+import { createLogger } from "./log.js";
+import { notifyError } from "./state.js";
 const log = createLogger("relay");
 import { saveLastUpdateId } from "./config.js";
 
