@@ -13,7 +13,8 @@
 // entire process.
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { OutgoingHandler } from "./outgoing.js";
+import type { TelegramApi } from "./api.js";
+import { OutgoingHandler } from "./outgoing.js";
 
 // ── Session Handle ────────────────────────────────────────────────────────────
 
@@ -61,9 +62,9 @@ export class SessionRegistry {
 	/** The most recently activated session (for General topic routing). */
 	private activeSessionId: string | undefined;
 
-	/** Register a new session with its topic thread.
-	 *  Call when a topic is created or restored for this session. */
-	register(sessionId: string, sessionFile: string | undefined, outgoing: OutgoingHandler): SessionHandle {
+	/** Register a new session. Creates a SessionHandle with a fresh OutgoingHandler. */
+	register(sessionId: string, sessionFile: string | undefined, api: TelegramApi): SessionHandle {
+		const outgoing = new OutgoingHandler(api);
 		const handle = new SessionHandle(sessionId, sessionFile, outgoing);
 		this.sessions.set(sessionId, handle);
 		return handle;
@@ -126,7 +127,7 @@ export class SessionRegistry {
 		return this.sessions.size;
 	}
 
-	/** Whether any session has a given thread ID subscribed. */
+	/** Whether any session has a given thread ID registered. */
 	hasThread(threadId: number): boolean {
 		return this.threadToSession.has(threadId);
 	}
@@ -137,7 +138,7 @@ export class SessionRegistry {
 	}
 
 	/** Iterate over all session handles. */
-	[Symbol.iterator](): Iterator<SessionHandle> {
+	values(): IterableIterator<SessionHandle> {
 		return this.sessions.values();
 	}
 }
