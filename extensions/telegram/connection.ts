@@ -1,6 +1,6 @@
 // ── Telegram Connection Lifecycle ────────────────────────────────────────────
 // Connect, disconnect, relay election, and failover.
-// Extracted from index.ts to keep the extension factory thin.
+// Renamed from lifecycle.ts to connection.ts as part of the layer redesign.
 //
 // No ctx is stored long-term. Long-lived callbacks (polling, relay) use
 // currentSession()?.ctx via notify() and updateStatus() with stderr fallback.

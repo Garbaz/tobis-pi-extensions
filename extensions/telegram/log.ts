@@ -104,7 +104,7 @@ export function createLogger(module: string): Logger {
 // ── Graceful shutdown ────────────────────────────────────────────────────────
 // pino.destination({ sync: false }) uses an async buffer. Flushing on shutdown
 // ensures the last log lines are written to disk before the process exits.
-// Call flushLogs() from lifecycle shutdown(). The beforeExit handler is a safety
+// Call flushLogs() from connection shutdown(). The beforeExit handler is a safety
 // net for abnormal exits where shutdown() isn't called.
 
 export function flushLogs(): void {

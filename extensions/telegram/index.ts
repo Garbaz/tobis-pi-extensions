@@ -2,7 +2,7 @@
 // Thin extension factory: registers commands, events, and tools.
 // All business logic lives in dedicated modules:
 //   state.ts      - shared mutable state (per-execution + per-session)
-//   lifecycle.ts  - connect, disconnect, relay, failover
+//   connection.ts - connect, disconnect, relay, failover
 //   session.ts    - session labels, topic setup, auto-rename
 //   prompt.ts     - system prompt injection for Telegram turns
 //   bridge.ts     - incoming/outgoing message orchestration
@@ -59,7 +59,7 @@ interface ToolExecutionEndEvent {
 import { registerTools } from "./tools.js";
 import { readSessionData } from "./topics.js";
 import { state, isTelegramConnected, updateStatus, initSession, removeSession, activateSession, currentSession, refreshSessionCtx } from "./state.js";
-import { connect, disconnect, shutdown } from "./lifecycle.js";
+import { connect, disconnect, shutdown } from "./connection.js";
 import { readConfig, updateConfig, saveConfigField, allowUser, blockUser, validateMediaConfig } from "./config.js";
 import { setupSessionTopic, teardownSession, renameTopicFromMessage, type SessionStartReason } from "./session.js";
 import { buildTelegramPromptSuffix } from "./prompt.js";
