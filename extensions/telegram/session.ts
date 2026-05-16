@@ -168,7 +168,7 @@ export async function ensureTopicCreated(): Promise<number | undefined> {
 }
 
 /** Rename the session's topic on first user message.
- *  Format: "basename · snippet". Only renames once (flag in SessionState).
+ *  Format: "basename · snippet". Only renames once (flag in SessionHandle).
  *  Skipped if topic was already renamed in a previous session (resumed). */
 export async function renameTopicFromMessage(text: string): Promise<void> {
 	const sess = currentSession();

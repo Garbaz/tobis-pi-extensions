@@ -196,13 +196,12 @@ export class TelegramBridge {
 		return restoredThreadId;
 	}
 
-	/** Unregister a session - close and remove its forum topic. */
+	/** Unregister a session - close its forum topic.
+	 *  Session handle is removed from registry by the caller (index.ts session_shutdown). */
 	async unregisterSession(sessionId: string, signal?: AbortSignal): Promise<void> {
 		if (this.topicManager) {
 			await this.topicManager.closeTopic(sessionId, signal);
-			this.topicManager.removeSession(sessionId);
 		}
-		// Session handle is removed from registry by the caller (index.ts session_shutdown)
 	}
 
 	/** Activate a session (switch topic context for current turn). */
@@ -331,15 +330,15 @@ export class TelegramBridge {
 	 *  that it was routed (silent visual feedback, no text clutter).
 	 *  Returns the echo message ID (if echoed), or undefined. */
 	private async routeToSession(msg: Message | undefined, chatId: number): Promise<number | undefined> {
-		if (!msg || !this.topicManager) return undefined;
+		if (!msg) return undefined;
 
-		const sessionId = this.topicManager.getSessionByThread(msg.message_thread_id);
+		const handle = state.registry.getByThread(msg.message_thread_id);
 		const isGeneralTopic = !msg.message_thread_id;
 
-		if (sessionId) {
-			state.registry.setActive(sessionId);
+		if (handle) {
+			state.registry.setActive(handle.sessionId);
 			return undefined;
-		} else if (isGeneralTopic) {
+		} else if (isGeneralTopic && this.topicManager) {
 			// Message in General topic - route to current session and echo into the thread
 			const handle = state.registry.getActive();
 			if (!handle) return undefined;

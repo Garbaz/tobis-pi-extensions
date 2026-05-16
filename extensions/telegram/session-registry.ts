@@ -4,7 +4,6 @@
 // and per-session outgoing handler references.
 //
 // Replaces the scattered session state that was previously split across:
-//   - state.ts SessionState (sessionId, sessionFile, topicRenamed, ctx)
 //   - TopicManager (threadId -> sessionId in-memory map)
 //   - bridge.ts (outgoingBySession, currentSessionId)
 //
