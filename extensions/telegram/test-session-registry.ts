@@ -12,26 +12,19 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { SessionRegistry } from "./session-registry.js";
-import { TelegramApi } from "./api.js";
-
-function createMockApi(): TelegramApi {
-	return new TelegramApi("mock-token");
-}
 
 describe("SessionRegistry - routing invariants", () => {
 	let registry: SessionRegistry;
-	let api: TelegramApi;
 
 	beforeEach(() => {
 		registry = new SessionRegistry();
-		api = createMockApi();
 	});
 
 	// Decision: unregister must clean up threadToSession reverse mapping.
 	// Without this, an incoming message for a dead session's thread would
 	// route to a stale handle, causing silent message loss or wrong routing.
 	it("unregister removes thread→session reverse mapping", () => {
-		const handle = registry.register("sess-1", undefined, api);
+		const handle = registry.register("sess-1", undefined);
 		registry.setThread("sess-1", 42, "topic");
 		registry.unregister("sess-1");
 		assert.equal(registry.getByThread(42), undefined, "thread 42 must not map to dead session");
@@ -42,8 +35,8 @@ describe("SessionRegistry - routing invariants", () => {
 	// Without this, getActive() returns a dead handle, and outgoing messages
 	// are sent to a session that no longer exists.
 	it("removing active session falls back to remaining session", () => {
-		registry.register("sess-1", undefined, api);
-		registry.register("sess-2", undefined, api);
+		registry.register("sess-1", undefined);
+		registry.register("sess-2", undefined);
 		registry.setActive("sess-1");
 		registry.unregister("sess-1");
 		assert.ok(registry.getActive(), "must have a fallback active session");
@@ -53,7 +46,7 @@ describe("SessionRegistry - routing invariants", () => {
 	// Decision: removing the only session clears active entirely.
 	// A stale active handle is worse than no active handle.
 	it("removing the only session clears active", () => {
-		registry.register("sess-1", undefined, api);
+		registry.register("sess-1", undefined);
 		registry.setActive("sess-1");
 		registry.unregister("sess-1");
 		assert.equal(registry.getActive(), undefined);
@@ -63,8 +56,8 @@ describe("SessionRegistry - routing invariants", () => {
 	// must return the new session. The old session may still have its
 	// threadId field set, but the canonical routing goes through the registry.
 	it("thread reassignment updates reverse mapping", () => {
-		registry.register("sess-1", undefined, api);
-		registry.register("sess-2", undefined, api);
+		registry.register("sess-1", undefined);
+		registry.register("sess-2", undefined);
 		registry.setThread("sess-1", 42, "old");
 		registry.setThread("sess-2", 42, "new");
 		// getByThread must route to the new owner

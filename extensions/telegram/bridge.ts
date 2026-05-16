@@ -3,6 +3,9 @@
 // flow. Delegates to incoming.ts and outgoing.ts for the heavy lifting.
 // Supports forum topics for multi-session routing (Bot API 9.4+).
 // Provides a callback query registry for extensions (e.g., permissions).
+//
+// Session routing uses state.registry (SessionRegistry) for thread↔session
+// mapping and active session tracking. Outgoing handlers live on SessionHandle.
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TelegramApi } from "./api.js";
@@ -11,6 +14,7 @@ import { handleUpdate, type IncomingDeps, type IncomingResult } from "./incoming
 import { OutgoingHandler } from "./outgoing.js";
 import type { PendingFile } from "./tools.js";
 import { TopicManager } from "./topics.js";
+import { state } from "./state.js";
 import { detectContentTypes, senderName, extractText } from "./formatting.js";
 
 // ── Callback Query Handler ────────────────────────────────────────────────────
@@ -54,15 +58,6 @@ export class TelegramBridge {
 	private pi: ExtensionAPI;
 	private callbacks: BridgeCallbacks;
 
-	/** Per-session outgoing handlers. Keyed by Pi session ID. */
-	private outgoingBySession = new Map<string, OutgoingHandler>();
-
-	/** The currently active session's outgoing handler (for legacy single-session flow). */
-	private activeOutgoing: OutgoingHandler;
-
-	/** The currently active session ID (set by activateSession / index.ts). */
-	private currentSessionId: string | undefined;
-
 	/** The chat ID currently locked to the Pi session. */
 	private activeChatId: number | undefined;
 
@@ -85,9 +80,7 @@ export class TelegramBridge {
 		this.config = config;
 		this.pi = pi;
 		this.callbacks = callbacks;
-		this.activeOutgoing = new OutgoingHandler(api);
 
-		// Build incoming deps - closures capture `this` for live access to bridge state
 		// Build incoming deps - closures capture `this` (the bridge) for live access.
 		// Note: activeChatId MUST be a closure reading from the bridge, NOT a getter
 		// on the deps object (plain object getters read `this` = the deps object itself).
@@ -123,10 +116,9 @@ export class TelegramBridge {
 	/** Lock the bridge to a specific chat. */
 	lockToChat(chatId: number): void {
 		this.activeChatId = chatId;
-		this.activeOutgoing.setActiveChatId(chatId);
-		// All session-specific handlers share the same chat (private chat with the bot)
-		for (const outgoing of this.outgoingBySession.values()) {
-			outgoing.setActiveChatId(chatId);
+		// Update outgoing handlers for all sessions
+		for (const handle of state.registry.values()) {
+			handle.outgoing?.setActiveChatId(chatId);
 		}
 		if (this.topicManager) {
 			this.topicManager.setChatId(chatId);
@@ -138,7 +130,10 @@ export class TelegramBridge {
 	unlock(): void {
 		if (this.activeChatId !== undefined) {
 			this.activeChatId = undefined;
-			this.activeOutgoing.setActiveChatId(undefined);
+			// Clear outgoing handlers' chat ID for all sessions
+			for (const handle of state.registry.values()) {
+				handle.outgoing?.setActiveChatId(undefined);
+			}
 			this.callbacks.onChatUnlock();
 		}
 	}
@@ -162,34 +157,41 @@ export class TelegramBridge {
 	}
 
 	/** Register a session with a forum topic. Creates the topic if topics are enabled.
+	 *  Configures the session handle's outgoing handler with thread and chat info.
 	 *  Returns the thread ID, or undefined if topics are disabled. */
 	async registerSession(sessionId: string, sessionName: string, signal?: AbortSignal, iconColor?: number): Promise<number | undefined> {
 		if (!this.topicManager) return undefined;
 
 		const threadId = await this.topicManager.createTopic(sessionId, sessionName, signal, iconColor);
 		if (threadId !== undefined) {
-			// Create an outgoing handler for this session
-			const outgoing = new OutgoingHandler(this.api);
-			if (this.activeChatId) outgoing.setActiveChatId(this.activeChatId);
-			outgoing.setThreadId(threadId);
-			this.outgoingBySession.set(sessionId, outgoing);
+			const handle = state.registry.get(sessionId);
+			if (handle) {
+				const outgoing = new OutgoingHandler(this.api);
+				if (this.activeChatId) outgoing.setActiveChatId(this.activeChatId);
+				outgoing.setThreadId(threadId);
+				handle.outgoing = outgoing;
+			}
+			state.registry.setThread(sessionId, threadId, sessionName);
 		}
 		return threadId;
 	}
 
 	/** Restore a session's existing forum topic (e.g., on reload/resume).
-	 *  Reopens the topic and re-registers it in the mapping without creating a new one.
+	 *  Reopens the topic and configures the session handle's outgoing handler.
 	 *  Returns the thread ID, or undefined if topics are disabled. */
 	async restoreSession(sessionId: string, threadId: number, name: string, signal?: AbortSignal): Promise<number | undefined> {
 		if (!this.topicManager) return undefined;
 
 		const restoredThreadId = await this.topicManager.restoreSession(sessionId, threadId, name, signal);
 		if (restoredThreadId !== undefined) {
-			// Create an outgoing handler for this session
-			const outgoing = new OutgoingHandler(this.api);
-			if (this.activeChatId) outgoing.setActiveChatId(this.activeChatId);
-			outgoing.setThreadId(restoredThreadId);
-			this.outgoingBySession.set(sessionId, outgoing);
+			const handle = state.registry.get(sessionId);
+			if (handle) {
+				const outgoing = new OutgoingHandler(this.api);
+				if (this.activeChatId) outgoing.setActiveChatId(this.activeChatId);
+				outgoing.setThreadId(restoredThreadId);
+				handle.outgoing = outgoing;
+			}
+			state.registry.setThread(sessionId, restoredThreadId, name);
 		}
 		return restoredThreadId;
 	}
@@ -200,24 +202,12 @@ export class TelegramBridge {
 			await this.topicManager.closeTopic(sessionId, signal);
 			this.topicManager.removeSession(sessionId);
 		}
-		this.outgoingBySession.delete(sessionId);
+		// Session handle is removed from registry by the caller (index.ts session_shutdown)
 	}
 
-	/** Activate a session's outgoing handler (switch topic context for current turn). */
+	/** Activate a session (switch topic context for current turn). */
 	activateSession(sessionId: string): void {
-		this.currentSessionId = sessionId;
-		const outgoing = this.outgoingBySession.get(sessionId);
-		if (outgoing) {
-			this.activeOutgoing = outgoing;
-		}
-	}
-
-	/** Get the outgoing handler for a specific session, or the active one as fallback. */
-	getOutgoing(sessionId?: string): OutgoingHandler {
-		if (sessionId) {
-			return this.outgoingBySession.get(sessionId) ?? this.activeOutgoing;
-		}
-		return this.activeOutgoing;
+		state.registry.setActive(sessionId);
 	}
 
 	// ── Incoming: Telegram → Pi ──────────────────────────────────────────────
@@ -244,7 +234,7 @@ export class TelegramBridge {
 			// For General-topic messages, this echoes the message into the session thread
 			const echoMessageId = await this.routeToSession(msg, result.chatId);
 
-			// Set \u23f3 reaction and track for completion
+			// Set reaction and track for completion
 			// If the message was echoed (General topic), use the echo's message_id for reply
 			this.trackUserMessage(result.chatId, echoMessageId ?? result.messageId);
 
@@ -257,47 +247,56 @@ export class TelegramBridge {
 
 	/** Called on agent_end: send final response, update reaction. */
 	async onAgentEnd(event: { messages: unknown[] }, ctx: ExtensionContext): Promise<void> {
-		await this.activeOutgoing.onAgentEnd(event, ctx);
+		const outgoing = state.registry.getActive()?.outgoing;
+		if (outgoing) await outgoing.onAgentEnd(event, ctx);
 	}
 
 	/** Called on message_update: streaming preview via editMessageText. */
 	async onMessageUpdate(event: { message: unknown; assistantMessageEvent: unknown }, ctx: ExtensionContext): Promise<void> {
-		await this.activeOutgoing.onMessageUpdate(event, ctx);
+		const outgoing = state.registry.getActive()?.outgoing;
+		if (outgoing) await outgoing.onMessageUpdate(event, ctx);
 	}
 
 	/** Flush any pending streaming edit. */
 	async flushPendingEdit(): Promise<void> {
-		await this.activeOutgoing.flushPendingEdit();
+		const outgoing = state.registry.getActive()?.outgoing;
+		if (outgoing) await outgoing.flushPendingEdit();
 	}
 
 	/** Start sending typing indicators. */
 	startTypingIndicator(ctx: ExtensionContext): void {
-		this.activeOutgoing.startTypingIndicator(ctx);
+		const outgoing = state.registry.getActive()?.outgoing;
+		if (outgoing) outgoing.startTypingIndicator(ctx);
 	}
 
 	/** Stop the typing indicator. */
 	stopTypingIndicator(): void {
-		this.activeOutgoing.stopTypingIndicator();
+		const outgoing = state.registry.getActive()?.outgoing;
+		if (outgoing) outgoing.stopTypingIndicator();
 	}
 
 	/** Queue a file for sending on the next agent_end. */
 	queueFile(file: PendingFile): void {
-		this.activeOutgoing.queueFile(file);
+		const outgoing = state.registry.getActive()?.outgoing;
+		if (outgoing) outgoing.queueFile(file);
 	}
 
 	/** Echo a TUI-originated user message to Telegram. */
 	async sendUserEcho(text: string): Promise<void> {
-		await this.activeOutgoing.sendUserEcho(text);
+		const outgoing = state.registry.getActive()?.outgoing;
+		if (outgoing) await outgoing.sendUserEcho(text);
 	}
 
 	/** Called when a tool starts executing. */
 	async onToolExecutionStart(toolName: string, args: Record<string, unknown>): Promise<void> {
-		await this.activeOutgoing.onToolExecutionStart(toolName, args);
+		const outgoing = state.registry.getActive()?.outgoing;
+		if (outgoing) await outgoing.onToolExecutionStart(toolName, args);
 	}
 
 	/** Called when a tool finishes executing. */
 	onToolExecutionEnd(toolName: string, args: Record<string, unknown>, isError: boolean): void {
-		this.activeOutgoing.onToolExecutionEnd(toolName, args, isError);
+		const outgoing = state.registry.getActive()?.outgoing;
+		if (outgoing) outgoing.onToolExecutionEnd(toolName, args, isError);
 	}
 
 	/** Register a callback query handler for a given prefix.
@@ -328,7 +327,7 @@ export class TelegramBridge {
 	/** Route an incoming message to the correct session's outgoing handler
 	 *  based on forum topic thread ID. For General topic messages, echoes the
 	 *  message into the session thread so the reply chain is in the right topic.
-	 *  Adds a \u{1F440} reaction on the original General-topic message to signal
+	 *  Adds a reaction on the original General-topic message to signal
 	 *  that it was routed (silent visual feedback, no text clutter).
 	 *  Returns the echo message ID (if echoed), or undefined. */
 	private async routeToSession(msg: Message | undefined, chatId: number): Promise<number | undefined> {
@@ -338,13 +337,16 @@ export class TelegramBridge {
 		const isGeneralTopic = !msg.message_thread_id;
 
 		if (sessionId) {
-			this.activateSession(sessionId);
+			state.registry.setActive(sessionId);
 			return undefined;
-		} else if (isGeneralTopic && this.currentSessionId) {
+		} else if (isGeneralTopic) {
 			// Message in General topic - route to current session and echo into the thread
-			this.activateSession(this.currentSessionId);
+			const handle = state.registry.getActive();
+			if (!handle) return undefined;
 
-			const outgoing = this.outgoingBySession.get(this.currentSessionId);
+			state.registry.setActive(handle.sessionId);
+
+			const outgoing = handle.outgoing;
 			if (!outgoing) return undefined;
 
 			// Get text from the General-topic message for echoing
@@ -400,8 +402,11 @@ export class TelegramBridge {
 
 	/** Set reaction on user message and track it for completion reaction. */
 	private trackUserMessage(chatId: number, messageId: number): void {
-		void this.activeOutgoing.setReaction(chatId, messageId, "\u{23F3}").catch(() => {});
-		this.activeOutgoing.setLastUserMessage(chatId, messageId);
+		const outgoing = state.registry.getActive()?.outgoing;
+		if (outgoing) {
+			void outgoing.setReaction(chatId, messageId, "\u{23F3}").catch(() => {});
+			outgoing.setLastUserMessage(chatId, messageId);
+		}
 	}
 
 	/** Store turn context from the incoming message for system prompt injection. */

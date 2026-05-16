@@ -1,7 +1,7 @@
 // ── Session Registry ──────────────────────────────────────────────────────────
 // Central mapping between Pi sessions and Telegram forum topics.
 // Owns the threadId <-> sessionId mapping, active session tracking,
-// and per-session outgoing handlers.
+// and per-session outgoing handler references.
 //
 // Replaces the scattered session state that was previously split across:
 //   - state.ts SessionState (sessionId, sessionFile, topicRenamed, ctx)
@@ -11,10 +11,18 @@
 // Layer: Instance (process-lifetime). Session handles are created/destroyed
 // on session_start/session_shutdown, but the registry itself lives for the
 // entire process.
+//
+// NOTE: OutgoingHandler is NOT imported here to avoid circular deps
+// (outgoing.ts → session.ts → state.ts → session-registry.ts).
+// The outgoing field is set externally by bridge.ts when topics are created.
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { TelegramApi } from "./api.js";
-import { OutgoingHandler } from "./outgoing.js";
+
+// ── OutgoingHandler type ─────────────────────────────────────────────────────
+// Forward declaration to avoid circular import. The actual class is in
+// outgoing.ts; callers that create outgoing handlers import it directly.
+
+import type { OutgoingHandler } from "./outgoing.js";
 
 // ── Session Handle ────────────────────────────────────────────────────────────
 
@@ -35,17 +43,16 @@ export class SessionHandle {
 	/** Whether the topic has been renamed from CWD basename to "basename . snippet". */
 	topicRenamed: boolean;
 
-	/** Per-session outgoing message handler. */
-	readonly outgoing: OutgoingHandler;
+	/** Per-session outgoing message handler. Set by bridge.registerSession/restoreSession. */
+	outgoing: OutgoingHandler | undefined;
 
 	/** Fresh ExtensionContext, refreshed by every Pi event handler.
 	 *  Long-lived callbacks use this with safeCtx() guard. */
 	ctx: ExtensionContext | undefined;
 
-	constructor(sessionId: string, sessionFile: string | undefined, outgoing: OutgoingHandler) {
+	constructor(sessionId: string, sessionFile: string | undefined) {
 		this.sessionId = sessionId;
 		this.sessionFile = sessionFile;
-		this.outgoing = outgoing;
 		this.topicRenamed = false;
 	}
 }
@@ -62,10 +69,9 @@ export class SessionRegistry {
 	/** The most recently activated session (for General topic routing). */
 	private activeSessionId: string | undefined;
 
-	/** Register a new session. Creates a SessionHandle with a fresh OutgoingHandler. */
-	register(sessionId: string, sessionFile: string | undefined, api: TelegramApi): SessionHandle {
-		const outgoing = new OutgoingHandler(api);
-		const handle = new SessionHandle(sessionId, sessionFile, outgoing);
+	/** Register a new session. OutgoingHandler is set later by bridge.registerSession. */
+	register(sessionId: string, sessionFile: string | undefined): SessionHandle {
+		const handle = new SessionHandle(sessionId, sessionFile);
 		this.sessions.set(sessionId, handle);
 		return handle;
 	}
@@ -80,7 +86,7 @@ export class SessionRegistry {
 		this.threadToSession.set(threadId, sessionId);
 	}
 
-	/** Unregister a session. Removes thread mapping and outgoing handler. */
+	/** Unregister a session. Removes thread mapping. */
 	unregister(sessionId: string): void {
 		const handle = this.sessions.get(sessionId);
 		if (!handle) return;

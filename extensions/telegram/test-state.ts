@@ -4,15 +4,11 @@
 // Key invariant: currentSession() must never return a stale handle.
 // When the active session is removed, it must fall back to another session
 // or undefined — never return a handle for a session that was unregistered.
-//
-// Trivial tests (initSession stores fields, refreshSessionCtx updates ctx)
-// are excluded — those just confirm Map.set behavior.
 
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
 	state,
-	getSession,
 	currentSession,
 	initSession,
 	removeSession,

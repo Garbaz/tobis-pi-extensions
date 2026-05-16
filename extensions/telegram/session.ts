@@ -104,7 +104,6 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 		log.debug({ threadId }, "setupSessionTopic: registered");
 		let created = false;
 		if (threadId !== undefined) {
-			bridge.activateSession(sess.sessionId);
 			activateSession(sess.sessionId);
 			await saveSessionFields(sess.sessionFile, { connected: true, threadId, topicName: label });
 			created = true;
@@ -161,7 +160,6 @@ export async function ensureTopicCreated(): Promise<number | undefined> {
 	const threadId = await bridge.registerSession(sess.sessionId, label, undefined, iconColor);
 	log.debug({ threadId }, "ensureTopicCreated: registered");
 	if (threadId !== undefined) {
-		bridge.activateSession(sess.sessionId);
 		activateSession(sess.sessionId);
 		await saveSessionFields(sess.sessionFile, { connected: true, threadId, topicName: label });
 	}

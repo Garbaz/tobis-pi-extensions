@@ -1,13 +1,15 @@
 // ── Shared Telegram Extension State ──────────────────────────────────────────
 //
-// Architecture: clear separation between per-execution (process-lifetime) state
-// and per-session state. ExtensionContext (ctx) is stored per-session and
-// refreshed by Pi event handlers. Long-lived callbacks (polling, relay) access
-// ctx through the session map with safeCtx() guard + stderr fallback.
+// Architecture: clear separation between instance (process-lifetime) state
+// and per-session state. ExtensionContext (ctx) is stored per-session in
+// SessionHandle and refreshed by Pi event handlers. Long-lived callbacks
+// (polling, relay) access ctx through registry.getActive()?.ctx with
+// safeCtx() guard + stderr fallback.
 //
-// Per-execution state lives in `state` (this module).
-// Per-session state lives in `sessions` map, keyed by session ID.
-// Event handlers store ctx: sessions[id].ctx = ctx (from handler parameter).
+// Instance state lives in `state` (this module).
+// Per-session state lives in SessionHandle (session-registry.ts).
+// The `registry` (SessionRegistry) owns all session handles.
+// Event handlers refresh ctx: handle.ctx = ctx (from handler parameter).
 // notify() tries ctx.ui.notify(), falls back to stderr - never silent.
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -16,6 +18,7 @@ import type { TelegramPolling } from "./polling.js";
 import type { TelegramBridge } from "./bridge.js";
 import type { TelegramConfig } from "./types.js";
 import type { RelayServer, RelayClient } from "./relay.js";
+import { SessionRegistry, type SessionHandle } from "./session-registry.js";
 
 // ── Pending User ──────────────────────────────────────────────────────────────
 
@@ -28,24 +31,7 @@ export interface PendingUser {
 	timestamp: string;
 }
 
-// ── Per-Session State ─────────────────────────────────────────────────────────
-
-/** State scoped to a single Pi session. Created on session_start, cleared on session_shutdown. */
-export interface SessionState {
-	/** Pi session ID. */
-	sessionId: string;
-	/** Path to pi's session .jsonl file (from ctx.sessionManager.getSessionFile()).
-	 *  Used to derive the per-session telegram data filename.
-	 *  Undefined for in-memory sessions. */
-	sessionFile: string | undefined;
-	/** Whether the topic has been renamed from CWD basename to a meaningful name. */
-	topicRenamed: boolean;
-	/** Fresh ExtensionContext, refreshed by every Pi event handler.
-	 *  Long-lived callbacks use currentSession()?.ctx with safeCtx() guard. */
-	ctx: ExtensionContext | undefined;
-}
-
-// ── Per-Execution State (process lifetime) ────────────────────────────────────
+// ── Instance State (process lifetime) ────────────────────────────────────────
 
 /** Mutable state that lives for the entire Pi process. No ctx stored here. */
 export interface TelegramState {
@@ -88,6 +74,11 @@ export interface TelegramState {
 	 *  Keyed by user ID - only the latest message per user is stored. */
 	pendingUsers: Map<number, PendingUser>;
 
+	// ── Session registry ──────────────────────────────────────────────────
+	/** Central session↔thread mapping and active session tracking.
+	 *  Process-lifetime; handles come and go with session_start/session_shutdown. */
+	registry: SessionRegistry;
+
 	// ── Session commands ───────────────────────────────────────────────────
 	/** Set when /new is triggered from Telegram - the next session_start
 	 *  should auto-connect to Telegram regardless of reason. Cleared after use. */
@@ -115,70 +106,61 @@ export const state: TelegramState = {
 	relayServer: undefined,
 	relayClient: undefined,
 	pendingUsers: new Map(),
+	registry: new SessionRegistry(),
 	pendingNewSession: false,
 };
 
-// ── Per-Session State Map ─────────────────────────────────────────────────────
+// ── Session Access Helpers ────────────────────────────────────────────────────
+// Thin wrappers over state.registry. Callers can also access the registry
+// directly when they need setThread, hasThread, getThreadIds, etc.
 
-/** Active sessions, keyed by session ID. Created on session_start, removed on session_shutdown. */
-const sessions = new Map<string, SessionState>();
-
-/** Internal: most recently activated session. */
-let currentSessionState: SessionState | undefined;
-
-/** Get per-session state. Returns undefined if session is not tracked. */
-export function getSession(sessionId: string): SessionState | undefined {
-	return sessions.get(sessionId);
+/** Get a session handle by ID. Returns undefined if not tracked. */
+export function getSession(sessionId: string): SessionHandle | undefined {
+	return state.registry.get(sessionId);
 }
 
-/** Get the current (most recently active) session. Returns undefined if none. */
-export function currentSession(): SessionState | undefined {
-	return currentSessionState;
+/** Get the current (most recently active) session handle. Returns undefined if none. */
+export function currentSession(): SessionHandle | undefined {
+	return state.registry.getActive();
 }
 
-/** Create or update per-session state. Called from session_start handler. */
-export function initSession(sessionId: string, sessionFile: string | undefined, ctx: ExtensionContext): SessionState {
-	const existing = sessions.get(sessionId);
+/** Register a new session. Called from session_start handler. */
+export function initSession(sessionId: string, sessionFile: string | undefined, ctx: ExtensionContext): SessionHandle {
+	const existing = state.registry.get(sessionId);
 	if (existing) {
 		existing.sessionFile = sessionFile;
 		existing.ctx = ctx;
 		return existing;
 	}
-	const s: SessionState = {
-		sessionId,
-		sessionFile,
-		topicRenamed: false,
-		ctx,
-	};
-	sessions.set(sessionId, s);
-	currentSessionState = s;
-	return s;
+	const handle = state.registry.register(sessionId, sessionFile);
+	handle.ctx = ctx;
+	state.registry.setActive(sessionId);
+	return handle;
 }
 
-/** Set a session as the currently active one (e.g., when a Telegram message routes to it). */
+/** Set a session as the currently active one. */
 export function activateSession(sessionId: string): void {
-	const s = sessions.get(sessionId);
-	if (s) {
-		currentSessionState = s;
-	}
+	state.registry.setActive(sessionId);
 }
 
 /** Refresh the stored ctx for a session. Called by every Pi event handler. */
 export function refreshSessionCtx(sessionId: string, ctx: ExtensionContext): void {
-	const s = sessions.get(sessionId);
-	if (s) {
-		s.ctx = ctx;
+	const handle = state.registry.get(sessionId);
+	if (handle) {
+		handle.ctx = ctx;
 	}
 }
 
-/** Remove per-session state. Called from session_shutdown handler. */
+/** Remove a session. Called from session_shutdown handler. */
 export function removeSession(sessionId: string): void {
-	sessions.delete(sessionId);
-	if (currentSessionState?.sessionId === sessionId) {
-		// Fall back to any remaining session, or undefined
-		currentSessionState = sessions.size > 0 ? sessions.values().next().value : undefined;
-	}
+	state.registry.unregister(sessionId);
 }
+
+// ── Re-exports for convenience ────────────────────────────────────────────────
+// Callers that need SessionHandle type or advanced registry operations
+// can import from session-registry.ts directly.
+
+export type { SessionHandle };
 
 // ── Derived State Helpers ────────────────────────────────────────────────────
 

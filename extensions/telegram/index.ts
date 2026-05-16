@@ -400,10 +400,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		refreshSessionCtx(sessionId, ctx);
 
 		// Activate the correct session's outgoing handler for this turn
-		if (state.bridge) {
-			state.bridge.activateSession(sessionId);
-			activateSession(sessionId);
-		}
+		activateSession(sessionId);
 		state.bridge?.startTypingIndicator(ctx);
 	});
 
@@ -417,11 +414,8 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		// Refresh ctx in session map for long-lived callbacks
 		refreshSessionCtx(sessionId, ctx);
 
-		// Activate the correct session's outgoing handler for this turn
-		if (state.bridge) {
-			state.bridge.activateSession(sessionId);
-			activateSession(sessionId);
-		}
+		// Activate the correct session for this turn
+		activateSession(sessionId);
 
 		const telegramCtx = state.bridge?.consumeTelegramContext();
 		if (!telegramCtx) return; // this turn didn't come from telegram
