@@ -58,7 +58,7 @@ Once configured, run `/telegram setup` in Pi and paste your bot token.
 - **Long polling** — `getUpdates` loop with `AbortController`, auto-reconnect, 409 conflict + 429 backoff
 - **Auth & pairing** — whitelist/blacklist model. `allowedUserId` auto-pair on first `/start`. Unknown users get "waiting for authorization" + TUI notification. Blacklisted users silently ignored. `/telegram allow`/`/telegram block` commands
 - **Multi-session via forum topics** -- each Pi session gets its own topic in the chat (Bot API 9.4+). Auto-detected from `getMe().has_topics_enabled`. Topic data persists across disconnects in `telegram-session.json`. Topics created immediately on connect with CWD basename, renamed to `basename \u00B7 snippet` on first user message. General topic routes to the active session with echo + eyes reaction.
-- **`connected` boolean sentinel** — `telegram-session.json` stores `{ connected, threadId?, threadName? }`. Auto-reconnect only when `connected: true` on resume/reload. Disconnect sets `connected: false` preserving topic data. New sessions require `/telegram connect`.
+- **`connected` boolean sentinel** — `telegram-session.json` stores `{ connected, threadId?, topicName? }`. Auto-reconnect only when `connected: true` on resume/reload. Disconnect sets `connected: false` preserving topic data. New sessions require `/telegram connect`.
 - **Message bridge** — incoming Telegram → `pi.sendUserMessage()`; `agent_end` → `sendMessage`; `message_update` → throttled `editMessageText` streaming preview
 - **TUI echo** — user messages from the terminal are mirrored to Telegram with a `\u{1F464}` prefix so Telegram users can follow along. No truncation.
 - **Tool call progress** — interleaved turn buffer: text blocks and tool lines (`\u{1F527} <b>toolName:</b> <code>summary</code>`) accumulated in a single message, edited in-place for preview, final message has proper interleaving
@@ -74,7 +74,7 @@ Once configured, run `/telegram setup` in Pi and paste your bot token.
 - **Bot commands** — `/status`, `/model` (read-only), `/new` (starts fresh session auto-connected to Telegram), `/compact`, `/stop`
 - **Status bar** — cleared when connected/paired; shows state needing attention (disconnected, unconfigured, awaiting pairing, processing media)
 - **Config** — `~/.pi/agent/extensions/pi-tobis-extensions/telegram.json`. All writes via `saveConfigField(key, value)` — reads current file, updates one key, writes back. Never full-overwrite.
-- **Session data** — `<sessionDir>/telegram-session.json` with `{ connected, threadId?, threadName? }`. All writes via `saveSessionFields(dir, partial)` — reads-merges-writes, never full overwrite.
+- **Session data** — `<sessionDir>/telegram-session.json` with `{ connected, threadId?, topicName? }`. All writes via `saveSessionFields(dir, partial)` — reads-merges-writes, never full overwrite.
 - **Runtime state** — `~/.pi/run/telegram/state.json` (polling cursor), `~/.pi/run/telegram/relay.lock` (relay PID), `~/.pi/run/telegram/relay.sock` (Unix socket)
 
 **Architecture:** 19 modules (~5,900 lines), zero external dependencies, raw `fetch` for Telegram API:

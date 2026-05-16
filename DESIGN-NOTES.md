@@ -62,15 +62,15 @@ Session data is stored in `<sessionDir>/telegram-session.json`:
 {
   "connected": true,
   "threadId": 123,
-  "threadName": "my-project · fix login bug"
+  "topicName": "my-project · fix login bug"
 }
 ```
 
 - **`connected` boolean** is the explicit sentinel — replaces the old file-existence check.
-- **`threadId`/`threadName`** survive disconnects, so reconnecting to the same session resumes its topic.
+- **`threadId`/`topicName`** survive disconnects, so reconnecting to the same session resumes its topic.
 - **All writes use `saveSessionFields(dir, partial)`** — reads current file, merges partial update, writes back. Never a full overwrite. This prevents clobbering fields that another process or concurrent write might have changed.
-- **Disconnect** sets `connected: false` (keeps `threadId`/`threadName`).
-- **Connect** sets `connected: true` (plus `threadId`/`threadName` when a topic is created or resumed).
+- **Disconnect** sets `connected: false` (keeps `threadId`/`topicName`).
+- **Connect** sets `connected: true` (plus `threadId`/`topicName` when a topic is created or resumed).
 
 ### Auth & User Management
 
@@ -140,7 +140,7 @@ Session data is stored in `<sessionDir>/telegram-session.json`:
 > **Status: Implemented.** Strict separation between config and runtime state.
 
 - **Config** (`~/.pi/agent/extensions/pi-tobis-extensions/telegram.json`): user-editable persistent settings. All writes via `saveConfigField(key, value)` — reads current file, updates one key, writes back. Never full-overwrite.
-- **Session data** (`<sessionDir>/telegram-session.json`): `{ connected, threadId?, threadName? }`. All writes via `saveSessionFields(dir, partial)` — reads-merges-writes, never full overwrite. `writeSessionData()` is private/internal only.
+- **Session data** (`<sessionDir>/telegram-session.json`): `{ connected, threadId?, topicName? }`. All writes via `saveSessionFields(dir, partial)` — reads-merges-writes, never full overwrite. `writeSessionData()` is private/internal only.
 - **Runtime state** (`~/.pi/run/telegram/state.json`): volatile polling cursor (`lastUpdateId`). Not in config file.
 - **Relay state** (`~/.pi/run/telegram/relay.lock`, `relay.sock`): PID file for election, Unix socket for distribution.
 - **No runtime fields in config**: `botUsername` from `getMe()`, `lastUpdateId`, `proactivePush` are module-level, not in config. `stripRuntimeFields()` cleans old config files.

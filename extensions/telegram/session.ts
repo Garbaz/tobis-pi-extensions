@@ -5,7 +5,7 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readSessionData, saveSessionFields } from "./topics.js";
-import { state, currentSession, activateSession } from "./state.js";
+import { state, currentSession, activateSession, notify } from "./state.js";
 
 // ── Topic Icon Colors ─────────────────────────────────────────────────────────
 // The 6 allowed icon colors for forum topics (from Bot API docs).
@@ -69,14 +69,14 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 		const threadId = await bridge.restoreSession(
 			sess.sessionId,
 			sessionData.threadId,
-			sessionData.threadName ?? label,
+			sessionData.topicName ?? label,
 		);
 		if (threadId !== undefined) {
 			// If already renamed in a previous session, mark as renamed
-			if (sessionData.threadName && sessionData.threadName.includes("\u00B7")) {
+			if (sessionData.topicName && sessionData.topicName.includes("\u00B7")) {
 				sess.topicRenamed = true;
 			}
-			ctx.ui.notify(`Telegram: resumed topic "${sessionData.threadName ?? label}"`, "info");
+			ctx.ui.notify(`Telegram: resumed topic "${sessionData.topicName ?? label}"`, "info");
 		}
 	} else if (state.topicsEnabled) {
 		// Create the topic immediately so it's ready for messages.
@@ -85,7 +85,7 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 		if (threadId !== undefined) {
 			bridge.activateSession(sess.sessionId);
 			activateSession(sess.sessionId);
-			await saveSessionFields(sess.sessionDir, { connected: true, threadId, threadName: label });
+			await saveSessionFields(sess.sessionDir, { connected: true, threadId, topicName: label });
 			ctx.ui.notify(`Telegram: created topic "${label}"`, "info");
 		}
 		// Hide the General topic - it's confusing when sessions have dedicated topics
@@ -114,7 +114,10 @@ export async function ensureTopicCreated(): Promise<number | undefined> {
 	const sess = currentSession();
 	const bridge = state.bridge;
 	const tm = bridge?.getTopicManager();
-	if (!sess || !bridge || !tm) return undefined;
+	if (!sess || !bridge || !tm) {
+		notify(`ensureTopicCreated: no session/bridge/tm - sess=${!!sess} bridge=${!!bridge} tm=${!!tm}`, "warning");
+		return undefined;
+	}
 
 	// Check if topic already exists
 	const existingTopic = tm.getSessionTopic(sess.sessionId);
@@ -130,7 +133,7 @@ export async function ensureTopicCreated(): Promise<number | undefined> {
 	if (threadId !== undefined) {
 		bridge.activateSession(sess.sessionId);
 		activateSession(sess.sessionId);
-		await saveSessionFields(sess.sessionDir, { connected: true, threadId, threadName: label });
+		await saveSessionFields(sess.sessionDir, { connected: true, threadId, topicName: label });
 	}
 	return threadId;
 }
@@ -141,15 +144,19 @@ export async function ensureTopicCreated(): Promise<number | undefined> {
 export async function renameTopicFromMessage(text: string): Promise<void> {
 	const sess = currentSession();
 	const tm = state.bridge?.getTopicManager();
-	if (!sess || sess.topicRenamed || !tm) return;
+	if (!sess || sess.topicRenamed || !tm) {
+		notify(`renameTopic: skip - sess=${!!sess} renamed=${sess?.topicRenamed} tm=${!!tm}`, "warning");
+		return;
+	}
 
 	const name = topicNameFromMessage(text);
+	notify(`renaming topic to "${name}"`, "info");
 	sess.topicRenamed = true;
 
 	await tm.renameTopic(sess.sessionId, name);
 	const topic = tm.getSessionTopic(sess.sessionId);
 	if (topic) {
-		await saveSessionFields(sess.sessionDir, { connected: true, threadId: topic.threadId, threadName: name });
+		await saveSessionFields(sess.sessionDir, { connected: true, threadId: topic.threadId, topicName: name });
 	}
 }
 

@@ -13,7 +13,7 @@ import { join } from "node:path";
 // Persists session telegram state to the session directory so connections
 // survive reloads and resumes. File: <sessionDir>/telegram-session.json
 // The `connected` field is the explicit sentinel — true when connected,
-// false or absent after disconnect. threadId/threadName are kept across
+// false or absent after disconnect. threadId/topicName are kept across
 // disconnects so reconnecting can resume the same topic.
 
 export interface TelegramSessionData {
@@ -23,7 +23,7 @@ export interface TelegramSessionData {
 	/** Forum topic thread ID (present if topics are enabled). */
 	threadId?: number;
 	/** Forum topic name (present if topics are enabled). */
-	threadName?: string;
+	topicName?: string;
 }
 
 /** Read persisted session data. Returns undefined if the file doesn't exist. */

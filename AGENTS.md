@@ -66,7 +66,7 @@ Custom pi extensions by Tobi.
 ### Key design decisions
 
 - **No external Telegram library** — raw `fetch` for Bot API calls
-- **Session data persistence**: `telegram-session.json` in session dir with `connected` boolean field (not file-existence sentinel). Topic data (`threadId`, `threadName`) preserved across disconnects. `saveSessionFields()` always reads-merges-writes — never full overwrite
+- **Session data persistence**: `telegram-session.json` in session dir with `connected` boolean field (not file-existence sentinel). Topic data (`threadId`, `topicName`) preserved across disconnects. `saveSessionFields()` always reads-merges-writes — never full overwrite
 - **Config writes**: `saveConfigField(key, value)` — reads current file, updates one key, writes back. Prevents clobbering external edits
 - **HTML parse mode** for Telegram output (not MarkdownV2). Custom `convertToHtml()` in `markdown.ts`
 - **Tool sentinel pattern**: `\x00TOOL` markers for tool lines that pass through HTML conversion as raw HTML
@@ -77,4 +77,4 @@ Custom pi extensions by Tobi.
 - **Multi-instance relay**: first pi instance becomes relay (poller + distributor), others connect as clients via Unix socket
 - **Media processing**: `openai-stt`, `openai-chat`, `bash` protocols. Files always downloaded even without processor
 - **Turn buffer**: interleaved text blocks and tool lines, edited in-place for preview
-- **No `console.*`/`process.stdout`** — use `ctx.ui.notify()` or `log.ts` helpers. stderr allowed as last-resort fallback
+- **No `console.*`/`process.stdout`/`process.stderr`** — use `notify()` from `state.ts` (tries `ctx.ui.notify()`, falls back to stderr internally). Never write to stderr directly in extension code; the `notify()` function handles the fallback path.
