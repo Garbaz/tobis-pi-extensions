@@ -9,24 +9,11 @@
 //   2. If no live relay, write our PID and verify we won the race.
 //   3. If another process wrote first, we lost - back off.
 
-import { readFile, unlink, mkdir } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import { open, type FileHandle } from "node:fs/promises";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import { warn } from "./log.js";
-
-// ── Paths ────────────────────────────────────────────────────────────────────
-
-/** Directory for all relay-related runtime files. */
-export const RUN_DIR = join(homedir(), ".pi", "run", "telegram");
-
-/** Path to the relay lock PID file. */
-const RELAY_LOCK_PATH = join(RUN_DIR, "relay.lock");
-
-/** Ensure the runtime directory exists. */
-export async function ensureRunDir(): Promise<void> {
-	await mkdir(RUN_DIR, { recursive: true });
-}
+import { createLogger } from "./log.js";
+import { RUN_DIR, RELAY_LOCK_PATH, ensureRunDir } from "./paths.js";
+const log = createLogger("relay-lock");
 
 // ── Lock Management ──────────────────────────────────────────────────────────
 
@@ -57,7 +44,7 @@ export async function tryAcquireRelayLock(): Promise<boolean> {
 				return false;
 			}
 			// Stale lock - we'll overwrite it below
-			warn(`[telegram-relay] Stale lock from PID ${existing.pid} - taking over`);
+			log.warn({ pid: existing.pid }, "Stale relay lock - taking over");
 		}
 
 		// Step 2: Write our PID

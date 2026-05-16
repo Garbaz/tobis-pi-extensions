@@ -717,10 +717,15 @@ with open('${pdfPath}', 'wb') as f: f.write(pdf)
 
 section("getMediaDir");
 
-const sessionDir = join(testDir, "session-test");
-const mdir = await getMediaDir(sessionDir);
+const sessionFile = join(testDir, "2026-01-01T00-00-00-000Z_abc123-def456.jsonl");
+const fallbackDir = join(testDir, "session-test");
+const mdir = await getMediaDir(sessionFile, fallbackDir);
 assert(existsSync(mdir), "getMediaDir creates directory");
-assertEqual(mdir, join(sessionDir, "media"), "getMediaDir returns <session>/media path");
+assertEqual(mdir, join(testDir, "2026-01-01T00-00-00-000Z_abc123-def456-media"), "getMediaDir returns per-session -media path");
+
+// Test fallback when sessionFile is undefined
+const fallbackMdir = await getMediaDir(undefined, fallbackDir);
+assertEqual(fallbackMdir, join(fallbackDir, "media"), "getMediaDir falls back to <sessionDir>/media when no sessionFile");
 
 // ── Summary ──────────────────────────────────────────────────────────────────
 

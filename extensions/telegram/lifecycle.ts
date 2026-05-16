@@ -12,7 +12,8 @@ import { TelegramBridge } from "./bridge.js";
 import { saveConfigField, readLastUpdateId, saveLastUpdateId } from "./config.js";
 import { RelayServer, RelayClient } from "./relay.js";
 import { tryAcquireRelayLock, releaseRelayLock } from "./relay-lock.js";
-import { log, warn, notifyError, notifyWarn } from "./log.js";
+import { createLogger, flushLogs, notifyError, notifyWarn } from "./log.js";
+const log = createLogger("lifecycle");
 import { state, updateStatus, notify, currentSession, safeCtx } from "./state.js";
 import { setupSessionTopic } from "./session.js";
 import { saveSessionFields } from "./topics.js";
@@ -151,8 +152,8 @@ export async function disconnect(ctx: ExtensionCommandContext | ExtensionContext
 
 	// Mark session as disconnected (keep threadId for potential resume on reconnect)
 	const sess = currentSession();
-	if (sess?.sessionDir) {
-		await saveSessionFields(sess.sessionDir, { connected: false });
+	if (sess?.sessionFile) {
+		await saveSessionFields(sess.sessionFile, { connected: false });
 	}
 
 	ctx.ui.notify("Telegram: disconnected", "info");
@@ -186,6 +187,9 @@ export async function shutdown(): Promise<void> {
 	if (state.lastUpdateId !== undefined) {
 		await saveLastUpdateId(state.lastUpdateId);
 	}
+
+	// Flush buffered log entries before exit
+	flushLogs();
 }
 
 // ── Relay Start ──────────────────────────────────────────────────────────────
@@ -199,6 +203,7 @@ async function startAsRelay(): Promise<void> {
 		await state.relayServer.start();
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
+		log.error({ err }, "Failed to start relay server");
 		notifyError(`Failed to start relay server: ${msg}`);
 		// Fall back to single-process polling (no relay)
 		state.isRelay = false;
@@ -207,6 +212,7 @@ async function startAsRelay(): Promise<void> {
 	}
 
 	if (!state.api) {
+		log.error("Internal error - API not initialized");
 		notifyError("Internal error - API not initialized");
 		updateStatus("internal error");
 		state.isRelay = false;
@@ -276,7 +282,7 @@ async function startAsClient(): Promise<void> {
 		notifyConnected();
 	} else {
 		// Can't connect to relay - try to become the relay ourselves
-		warn("[telegram] Cannot connect to relay - attempting to take over");
+		log.warn("Cannot connect to relay - attempting to take over");
 		await attemptFailover();
 	}
 }
@@ -286,7 +292,7 @@ async function attemptFailover(): Promise<void> {
 	// Try to acquire the relay lock
 	const gotLock = await tryAcquireRelayLock();
 	if (gotLock) {
-		log("[telegram] Acquired relay lock - becoming the poller");
+		log.info("Acquired relay lock - becoming the poller");
 		// Clean up client state
 		state.relayClient?.disconnect();
 		state.relayClient = undefined;
@@ -296,7 +302,7 @@ async function attemptFailover(): Promise<void> {
 		// (The relay processes updates locally, so no subscription needed for itself)
 	} else {
 		// Another client won the race - try to reconnect as a client
-		log("[telegram] Another instance became relay - reconnecting as client");
+		log.info("Another instance became relay - reconnecting as client");
 		state.relayClient?.disconnect();
 		state.relayClient = undefined;
 

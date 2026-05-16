@@ -5,13 +5,21 @@
 
 import type { TelegramApi } from "./api.js";
 import type { ForumTopic } from "./types.js";
-import { notifyWarn, debugLog } from "./log.js";
+import { createLogger, notifyWarn } from "./log.js";
+const log = createLogger("topic");
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
 // ── Session Persistence ─────────────────────────────────────────────────────
-// Persists session telegram state to the session directory so connections
-// survive reloads and resumes. File: <sessionDir>/telegram-session.json
+// Persists session telegram state as a companion file next to pi's session
+// .jsonl. This ensures each pi instance (even in the same CWD) gets its own
+// file, keyed by the session file basename rather than the shared sessionDir.
+//
+// Pi's session layout:
+//   ~/.pi/agent/sessions/--<cwd-encoded>--/
+//     2026-05-15T16-00-15-694Z_019e2c5d-....jsonl   (pi's session file)
+//     2026-05-15T16-00-15-694Z_019e2c5d-....-telegram.json  (our companion)
+//
 // The `connected` field is the explicit sentinel — true when connected,
 // false or absent after disconnect. threadId/topicName are kept across
 // disconnects so reconnecting can resume the same topic.
@@ -26,10 +34,21 @@ export interface TelegramSessionData {
 	topicName?: string;
 }
 
+/** Derive the per-session telegram data file path from the session file path.
+ *  E.g. ".../<timestamp>_<sessionId>.jsonl" → ".../<timestamp>_<sessionId>-telegram.json"
+ *  Returns undefined if sessionFile is undefined (in-memory session). */
+export function sessionDataPath(sessionFile: string | undefined): string | undefined {
+	if (!sessionFile) return undefined;
+	const base = sessionFile.replace(/\.jsonl$/, "");
+	return `${base}-telegram.json`;
+}
+
 /** Read persisted session data. Returns undefined if the file doesn't exist. */
-export async function readSessionData(sessionDir: string): Promise<TelegramSessionData | undefined> {
+export async function readSessionData(sessionFile: string | undefined): Promise<TelegramSessionData | undefined> {
+	const filePath = sessionDataPath(sessionFile);
+	if (!filePath) return undefined;
 	try {
-		const raw = await readFile(join(sessionDir, "telegram-session.json"), "utf-8");
+		const raw = await readFile(filePath, "utf-8");
 		return JSON.parse(raw) as TelegramSessionData;
 	} catch {
 		return undefined;
@@ -38,17 +57,19 @@ export async function readSessionData(sessionDir: string): Promise<TelegramSessi
 
 /** Write full session data (overwrites the file). Internal only - never export.
  *  All external callers must use saveSessionFields to avoid clobbering. */
-async function writeSessionData(sessionDir: string, data: TelegramSessionData): Promise<void> {
-	await mkdir(sessionDir, { recursive: true });
-	await writeFile(join(sessionDir, "telegram-session.json"), JSON.stringify(data, null, 2), "utf-8");
+async function writeSessionData(filePath: string, data: TelegramSessionData): Promise<void> {
+	await mkdir(join(filePath, ".."), { recursive: true });
+	await writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 
 /** Update session data fields without clobbering others.
  *  Reads the current file, merges the new values, and writes back. */
-export async function saveSessionFields(sessionDir: string, fields: Partial<TelegramSessionData>): Promise<void> {
-	const existing = await readSessionData(sessionDir) ?? {};
+export async function saveSessionFields(sessionFile: string | undefined, fields: Partial<TelegramSessionData>): Promise<void> {
+	const filePath = sessionDataPath(sessionFile);
+	if (!filePath) return;
+	const existing = await readSessionData(sessionFile) ?? {};
 	Object.assign(existing, fields);
-	await writeSessionData(sessionDir, existing);
+	await writeSessionData(filePath, existing);
 }
 
 export interface SessionTopic {
@@ -104,7 +125,7 @@ export class TopicManager {
 
 		// Truncate name to 128 chars (Telegram limit)
 		const topicName = name.slice(0, 128);
-		debugLog(`TopicManager.createTopic: sessionId=${sessionId.slice(0, 8)} name="${topicName}" chatId=${this.chatId}`);
+		log.debug({ sessionId: sessionId.slice(0, 8), topicName, chatId: this.chatId }, "createTopic");
 
 		try {
 			const topic: ForumTopic = await this.api.createForumTopic({
@@ -119,7 +140,7 @@ export class TopicManager {
 				isOpen: true,
 			});
 			this.threadToSession.set(topic.message_thread_id, sessionId);
-			debugLog(`TopicManager.createTopic: created threadId=${topic.message_thread_id} for session ${sessionId.slice(0, 8)}`);
+			log.debug({ threadId: topic.message_thread_id }, "createTopic: created");
 
 			return topic.message_thread_id;
 		} catch (err) {
@@ -213,22 +234,22 @@ export class TopicManager {
 	/** Update a session's topic name. */
 	async renameTopic(sessionId: string, name: string, signal?: AbortSignal): Promise<void> {
 		const session = this.sessions.get(sessionId);
-		debugLog(`TopicManager.renameTopic: sessionId=${sessionId.slice(0, 8)} session=${session ? `threadId=${session.threadId} name="${session.name}"` : "NOT FOUND"} newName="${name}"`);
+		log.debug({ sessionId: sessionId.slice(0, 8), threadId: session?.threadId, name: session?.name, newName: name }, "renameTopic");
 		if (!session) return;
 
 		const topicName = name.slice(0, 128);
 
 		try {
-			debugLog(`TopicManager.renameTopic: calling editForumTopic(chat_id=${this.chatId}, thread_id=${session.threadId}, name="${topicName}")`);
+			log.debug({ chatId: this.chatId, threadId: session.threadId, name: topicName }, "renameTopic: calling editForumTopic");
 			await this.api.editForumTopic({
 				chat_id: this.chatId,
 				message_thread_id: session.threadId,
 				name: topicName,
 			}, signal);
-			debugLog(`TopicManager.renameTopic: editForumTopic succeeded`);
+			log.debug("renameTopic: succeeded");
 			session.name = topicName;
 		} catch (err) {
-			debugLog(`TopicManager.renameTopic: editForumTopic FAILED: ${err instanceof Error ? err.message : String(err)}`);
+			log.debug({ err: err instanceof Error ? err.message : String(err) }, "renameTopic: FAILED");
 			if (isNotSupergroupForum(err)) {
 				notifyWarn(`editForumTopic returned "not a supergroup forum" - private chat topics may not support rename`);
 				return;

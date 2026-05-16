@@ -15,7 +15,8 @@ import { getMediaDir, getMediaInfo, downloadMediaFile, processMedia, truncatePro
 import { checkUserAuth } from "./config.js";
 import { state, currentSession, safeCtx, notify } from "./state.js";
 import { ensureTopicCreated } from "./session.js";
-import { debugLog } from "./log.js";
+import { createLogger, notifyError } from "./log.js";
+const log = createLogger("incoming");
 import type { PendingUser } from "./state.js";
 
 // ── Incoming Context ─────────────────────────────────────────────────────────
@@ -85,7 +86,7 @@ async function handleMessage(
 ): Promise<IncomingResult | undefined> {
 	const { api, config, pi, activeChatId, lockToChat, onAccept } = deps;
 
-	debugLog(`handleMessage: from=${message.from?.id} text=${(message.text || message.caption || "").slice(0, 40)} thread_id=${message.message_thread_id}`);
+	log.debug({ from: message.from?.id, threadId: message.message_thread_id }, "handleMessage");
 
 	// Skip forum topic service messages - they come from the bot itself,
 	// not the user, and carry no user content.
@@ -356,14 +357,16 @@ async function formatMessageContent(
 		let localPath: string | undefined;
 
 		try {
-			// Use session directory from per-session state (set on session_start)
+			// Per-session media directory (avoids cross-talk when multiple
+			// pi instances share the same CWD).
 			const sess = currentSession();
-			const sessionDir = sess?.sessionDir;
+			const sessionFile = sess?.sessionFile;
+			const sessionDir = sess?.ctx ? sess.ctx.sessionManager.getSessionDir() : undefined;
 			if (!sessionDir) {
 				// No active session - can't download media files
 				return { text: formatIncomingText(`${emoji} [Session not available - cannot download file]${caption}`, isEdit), unprocessed };
 			}
-			const mediaDir = await getMediaDir(sessionDir);
+			const mediaDir = await getMediaDir(sessionFile, sessionDir);
 			localPath = await downloadMediaFile(
 				api,
 				mediaInfo.fileId,

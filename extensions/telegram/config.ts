@@ -1,6 +1,7 @@
 // ── Telegram Extension Config ────────────────────────────────────────────────
-// Reads/writes config at ~/.pi/agent/extensions/pi-tobis-extensions/telegram.json
-// and runtime state at ~/.pi/run/telegram/state.json.
+// Reads/writes config at <agentDir>/extensions/pi-tobis-extensions/telegram.json
+// and runtime state at <agentDir>/run/telegram/state.json.
+// All paths derived from pi's getAgentDir() — see paths.ts.
 //
 // Config = user-editable persistent settings (botToken, allowedUserId, media).
 // State  = runtime cursor that changes on every message (lastUpdateId).
@@ -11,20 +12,9 @@
 // Semantic validation (bash {file} placeholder, API url/model) is separate.
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
-import { homedir, tmpdir } from "node:os";
 import type { TelegramConfig, MediaProcessor, MediaType } from "./types.js";
 import { checkConfig, applyDefaults, validateConfig as schemaValidate } from "./schema.js";
-import { ensureRunDir, RUN_DIR } from "./relay-lock.js";
-
-const CONFIG_DIR = join(homedir(), ".pi", "agent", "extensions", "pi-tobis-extensions");
-const CONFIG_PATH = join(CONFIG_DIR, "telegram.json");
-
-/** Path to the runtime state file (~/.pi/run/telegram/state.json). */
-export const STATE_PATH = join(RUN_DIR, "state.json");
-
-/** Legacy state path (pre-relay, in /tmp). Used for migration. */
-const OLD_STATE_PATH = join(tmpdir(), "pi-telegram-state.json");
+import { CONFIG_DIR, CONFIG_PATH, STATE_PATH, OLD_STATE_PATH, ensureRunDir } from "./paths.js";
 
 const DEFAULT_CONFIG: TelegramConfig = {
 	botToken: undefined,
@@ -137,11 +127,11 @@ export async function updateConfig(partial: Partial<TelegramConfig>): Promise<Te
 }
 
 // ── State (runtime polling cursor) ───────────────────────────────────────────
-// Persisted to ~/.pi/run/telegram/state.json, separate from user config.
+// Persisted to <agentDir>/run/telegram/state.json, separate from user config.
 // The lastUpdateId is a volatile polling cursor - it changes on every message
 // and should never be mixed into the user-editable config file.
 
-/** Migrate state file from /tmp to ~/.pi/run/telegram/ if the new location doesn't exist yet. */
+/** Migrate state file from /tmp to <agentDir>/run/telegram/ if the new location doesn't exist yet. */
 async function migrateStateFile(): Promise<void> {
 	try {
 		await readFile(STATE_PATH, "utf8");
@@ -149,11 +139,13 @@ async function migrateStateFile(): Promise<void> {
 	} catch {
 		// New location doesn't exist - try to migrate from old location
 	}
-	try {
-		const oldData = await readFile(OLD_STATE_PATH, "utf8");
-		await writeFile(STATE_PATH, oldData, "utf8");
-	} catch {
-		// Old file doesn't exist either - nothing to migrate
+	if (OLD_STATE_PATH) {
+		try {
+			const oldData = await readFile(OLD_STATE_PATH, "utf8");
+			await writeFile(STATE_PATH, oldData, "utf8");
+		} catch {
+			// Old file doesn't exist either - nothing to migrate
+		}
 	}
 }
 

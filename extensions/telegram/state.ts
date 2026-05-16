@@ -34,8 +34,10 @@ export interface PendingUser {
 export interface SessionState {
 	/** Pi session ID. */
 	sessionId: string;
-	/** Session directory path (from ctx.sessionManager.getSessionDir()). */
-	sessionDir: string;
+	/** Path to pi's session .jsonl file (from ctx.sessionManager.getSessionFile()).
+	 *  Used to derive the per-session telegram data filename.
+	 *  Undefined for in-memory sessions. */
+	sessionFile: string | undefined;
 	/** Whether the topic has been renamed from CWD basename to a meaningful name. */
 	topicRenamed: boolean;
 	/** Fresh ExtensionContext, refreshed by every Pi event handler.
@@ -70,7 +72,7 @@ export interface TelegramState {
 	topicsEnabled: boolean;
 
 	// ── Polling cursor ────────────────────────────────────────────────────
-	/** Last processed update_id + 1. Persisted to ~/.pi/run/telegram/state.json. */
+	/** Last processed update_id + 1. Persisted to <agentDir>/run/telegram/state.json. */
 	lastUpdateId: number | undefined;
 
 	// ── Relay ─────────────────────────────────────────────────────────────
@@ -135,16 +137,16 @@ export function currentSession(): SessionState | undefined {
 }
 
 /** Create or update per-session state. Called from session_start handler. */
-export function initSession(sessionId: string, sessionDir: string, ctx: ExtensionContext): SessionState {
+export function initSession(sessionId: string, sessionFile: string | undefined, ctx: ExtensionContext): SessionState {
 	const existing = sessions.get(sessionId);
 	if (existing) {
-		existing.sessionDir = sessionDir;
+		existing.sessionFile = sessionFile;
 		existing.ctx = ctx;
 		return existing;
 	}
 	const s: SessionState = {
 		sessionId,
-		sessionDir,
+		sessionFile,
 		topicRenamed: false,
 		ctx,
 	};

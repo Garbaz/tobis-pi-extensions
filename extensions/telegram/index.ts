@@ -335,8 +335,8 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		}
 
 		// Initialize per-session state and store fresh ctx
-		const sessionDir = ctx.sessionManager.getSessionDir();
-		initSession(sessionId, sessionDir, ctx);
+		const sessionFile = ctx.sessionManager.getSessionFile();
+		initSession(sessionId, sessionFile, ctx);
 
 		// Only auto-connect on resume/reload - these are continuations of an existing session.
 		// startup/new/fork are fresh sessions that require explicit /telegram connect.
@@ -353,7 +353,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		}
 
 		// Check if this session was previously connected (connected flag in session data)
-		const sessionData = await readSessionData(sessionDir);
+		const sessionData = await readSessionData(sessionFile);
 		if (!sessionData?.connected) {
 			// Not connected or explicitly disconnected - user must run /telegram connect
 			updateStatus();

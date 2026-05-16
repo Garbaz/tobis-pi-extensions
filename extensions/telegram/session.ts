@@ -6,7 +6,8 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readSessionData, saveSessionFields } from "./topics.js";
 import { state, currentSession, activateSession, notify } from "./state.js";
-import { debugLog } from "./log.js";
+import { createLogger } from "./log.js";
+const log = createLogger("session");
 
 // ── Topic Icon Colors ─────────────────────────────────────────────────────────
 // The 6 allowed icon colors for forum topics (from Bot API docs).
@@ -25,7 +26,7 @@ const TOPIC_ICON_COLORS = [
 function cwdBasename(): string {
 	const cwd = process.cwd();
 	const name = cwd.split("/").pop() || "session";
-	debugLog(`cwdBasename: cwd="${cwd}" -> "${name}"`);
+	log.debug({ cwd, name }, "cwdBasename");
 	return name;
 }
 
@@ -36,7 +37,7 @@ export function topicNameFromMessage(text: string): string {
 	// Take first line, strip leading / commands, trim whitespace
 	const firstLine = text.split("\n")[0]?.trim() || "";
 	const snippet = firstLine.replace(/^\/\S+\s*/, "").slice(0, 60).trim();
-	debugLog(`topicNameFromMessage: firstLine="${firstLine.slice(0, 80)}" snippet="${snippet.slice(0, 80)}"`);
+	log.debug({ snippet }, "topicNameFromMessage");
 	if (!snippet) return basename;
 	const name = `${basename} \u00B7 ${snippet}`;
 	return name.slice(0, 128);
@@ -67,18 +68,18 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 	const sess = currentSession();
 	const bridge = state.bridge;
 	const tm = bridge?.getTopicManager();
-	debugLog(`setupSessionTopic: sess=${!!sess} bridge=${!!bridge} tm=${!!tm} allowedUserId=${state.config.allowedUserId} reason=${reason}`);
+	log.debug({ hasSession: !!sess, hasBridge: !!bridge, hasTm: !!tm, allowedUserId: state.config.allowedUserId, reason }, "setupSessionTopic");
 	if (!sess || !bridge || !tm || !state.config.allowedUserId) return { action: "skipped" };
 
 	const label = cwdBasename();
-	debugLog(`setupSessionTopic: sessionId=${sess.sessionId.slice(0, 8)} label="${label}" topicsEnabled=${state.topicsEnabled} topicRenamed=${sess.topicRenamed}`);
+	log.debug({ sessionId: sess.sessionId.slice(0, 8), label, topicsEnabled: state.topicsEnabled, topicRenamed: sess.topicRenamed }, "setupSessionTopic: init");
 
 	// Only resume existing topic on resume/reload - never on new/startup/fork
 	const canResume = reason === "resume" || reason === "reload";
 
 	// Check for existing session data (resume vs create)
-	const sessionData = await readSessionData(sess.sessionDir);
-	debugLog(`setupSessionTopic: canResume=${canResume} sessionData=${sessionData ? JSON.stringify(sessionData) : "none"}`);
+	const sessionData = await readSessionData(sess.sessionFile);
+	log.debug({ canResume, hasSessionData: !!sessionData, threadId: sessionData?.threadId }, "setupSessionTopic: resume check");
 	if (canResume && sessionData?.threadId) {
 		// Resume existing topic
 		const threadId = await bridge.restoreSession(
@@ -86,26 +87,26 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 			sessionData.threadId,
 			sessionData.topicName ?? label,
 		);
-		debugLog(`setupSessionTopic: restoreSession returned threadId=${threadId}`);
+		log.debug({ threadId }, "setupSessionTopic: restored");
 		if (threadId !== undefined) {
 			// If already renamed in a previous session, mark as renamed
 			if (sessionData.topicName && sessionData.topicName.includes("\u00B7")) {
 				sess.topicRenamed = true;
-				debugLog(`setupSessionTopic: topic already renamed (has middle dot), setting topicRenamed=true`);
+				log.debug("setupSessionTopic: topic already renamed");
 			}
 			return { action: "resumed", topicName: sessionData.topicName ?? label };
 		}
 	} else if (state.topicsEnabled) {
 		// Create the topic immediately so it's ready for messages.
 		const iconColor = TOPIC_ICON_COLORS[Math.floor(Math.random() * TOPIC_ICON_COLORS.length)];
-		debugLog(`setupSessionTopic: creating topic "${label}" for session ${sess.sessionId.slice(0, 8)}`);
+		log.debug({ label, sessionId: sess.sessionId.slice(0, 8) }, "setupSessionTopic: creating topic");
 		const threadId = await bridge.registerSession(sess.sessionId, label, undefined, iconColor);
-		debugLog(`setupSessionTopic: registerSession returned threadId=${threadId}`);
+		log.debug({ threadId }, "setupSessionTopic: registered");
 		let created = false;
 		if (threadId !== undefined) {
 			bridge.activateSession(sess.sessionId);
 			activateSession(sess.sessionId);
-			await saveSessionFields(sess.sessionDir, { connected: true, threadId, topicName: label });
+			await saveSessionFields(sess.sessionFile, { connected: true, threadId, topicName: label });
 			created = true;
 		}
 		// Hide the General topic - it's confusing when sessions have dedicated topics
@@ -120,11 +121,11 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 	// On new/startup/fork, always write fresh (may overwrite stale data from a previous session).
 	// On resume/reload, only write if no session data exists yet.
 	if (!canResume || !sessionData) {
-		await saveSessionFields(sess.sessionDir, { connected: true });
+		await saveSessionFields(sess.sessionFile, { connected: true });
 	}
 
 	// Subscribe to this thread via the relay client (if we're not the relay)
-	const sessionDataAfter = await readSessionData(sess.sessionDir);
+	const sessionDataAfter = await readSessionData(sess.sessionFile);
 	if (sessionDataAfter?.threadId && state.relayClient?.isConnected()) {
 		state.relayClient.subscribe(sessionDataAfter.threadId, sess.sessionId);
 	}
@@ -140,14 +141,14 @@ export async function ensureTopicCreated(): Promise<number | undefined> {
 	const sess = currentSession();
 	const bridge = state.bridge;
 	const tm = bridge?.getTopicManager();
-	debugLog(`ensureTopicCreated: sess=${!!sess} bridge=${!!bridge} tm=${!!tm}`);
+	log.debug({ hasSession: !!sess, hasBridge: !!bridge, hasTm: !!tm }, "ensureTopicCreated");
 	if (!sess || !bridge || !tm) return undefined;
 
-	debugLog(`ensureTopicCreated: guard passed, sessionId=${sess.sessionId.slice(0, 8)}`);
+	log.debug({ sessionId: sess.sessionId.slice(0, 8) }, "ensureTopicCreated: checking");
 
 	// Check if topic already exists
 	const existingTopic = tm.getSessionTopic(sess.sessionId);
-	debugLog(`ensureTopicCreated: sessionId=${sess.sessionId.slice(0, 8)} existingTopic=${existingTopic ? `threadId=${existingTopic.threadId} name="${existingTopic.name}"` : "none"}`);
+	log.debug({ sessionId: sess.sessionId.slice(0, 8), threadId: existingTopic?.threadId, topicName: existingTopic?.name }, "ensureTopicCreated: existing");
 	if (existingTopic) {
 		return existingTopic.threadId;
 	}
@@ -155,14 +156,14 @@ export async function ensureTopicCreated(): Promise<number | undefined> {
 	// Topic doesn't exist yet - create it now (fallback)
 	const iconColor = TOPIC_ICON_COLORS[Math.floor(Math.random() * TOPIC_ICON_COLORS.length)];
 	const label = cwdBasename();
-	debugLog(`ensureTopicCreated: creating fallback topic "${label}" for session ${sess.sessionId.slice(0, 8)}`);
+	log.debug({ label, sessionId: sess.sessionId.slice(0, 8) }, "ensureTopicCreated: creating fallback topic");
 
 	const threadId = await bridge.registerSession(sess.sessionId, label, undefined, iconColor);
-	debugLog(`ensureTopicCreated: registerSession returned threadId=${threadId}`);
+	log.debug({ threadId }, "ensureTopicCreated: registered");
 	if (threadId !== undefined) {
 		bridge.activateSession(sess.sessionId);
 		activateSession(sess.sessionId);
-		await saveSessionFields(sess.sessionDir, { connected: true, threadId, topicName: label });
+		await saveSessionFields(sess.sessionFile, { connected: true, threadId, topicName: label });
 	}
 	return threadId;
 }
@@ -173,25 +174,23 @@ export async function ensureTopicCreated(): Promise<number | undefined> {
 export async function renameTopicFromMessage(text: string): Promise<void> {
 	const sess = currentSession();
 	const tm = state.bridge?.getTopicManager();
-	debugLog(`renameTopicFromMessage: sess=${!!sess} topicRenamed=${sess?.topicRenamed} tm=${!!tm} text="${text.slice(0, 60)}"`);
+	log.debug({ hasSession: !!sess, topicRenamed: sess?.topicRenamed, hasTm: !!tm }, "renameTopicFromMessage");
 	if (!sess || sess.topicRenamed || !tm) {
-		debugLog(`renameTopicFromMessage: EARLY RETURN - sess=${!!sess} topicRenamed=${sess?.topicRenamed} tm=${!!tm}`);
 		return;
 	}
 
 	const name = topicNameFromMessage(text);
-	debugLog(`renameTopicFromMessage: sessionId=${sess.sessionId.slice(0, 8)} newName="${name}"`);
+	log.debug({ sessionId: sess.sessionId.slice(0, 8), name }, "renameTopicFromMessage: renaming");
 	sess.topicRenamed = true;
 
-	debugLog(`renameTopicFromMessage: calling tm.renameTopic(sessionId=${sess.sessionId.slice(0, 8)}, name="${name}")`);
 	await tm.renameTopic(sess.sessionId, name);
-	debugLog(`renameTopicFromMessage: renameTopic returned`);
+	log.debug("renameTopicFromMessage: done");
 
 	const topic = tm.getSessionTopic(sess.sessionId);
-	debugLog(`renameTopicFromMessage: after rename, topic=${topic ? `threadId=${topic.threadId} name="${topic.name}"` : "none"}`);
+	log.debug({ threadId: topic?.threadId, name: topic?.name }, "renameTopicFromMessage: after rename");
 	if (topic) {
-		await saveSessionFields(sess.sessionDir, { connected: true, threadId: topic.threadId, topicName: name });
-		debugLog(`renameTopicFromMessage: saved session data with topicName="${name}"`);
+		await saveSessionFields(sess.sessionFile, { connected: true, threadId: topic.threadId, topicName: name });
+		log.debug({ topicName: name }, "renameTopicFromMessage: saved");
 	}
 }
 

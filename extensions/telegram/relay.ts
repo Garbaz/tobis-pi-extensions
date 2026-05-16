@@ -15,17 +15,10 @@
 import { createServer, createConnection, type Server, type Socket } from "node:net";
 import { unlink } from "node:fs/promises";
 import type { Update, Message } from "./types.js";
-import { ensureRunDir, RUN_DIR } from "./relay-lock.js";
-import { log, warn, notifyError } from "./log.js";
+import { RELAY_SOCKET_PATH, ensureRunDir } from "./paths.js";
+import { createLogger, notifyError } from "./log.js";
+const log = createLogger("relay");
 import { saveLastUpdateId } from "./config.js";
-
-// ── Paths ────────────────────────────────────────────────────────────────────
-
-/** Path to the Unix domain socket for IPC. */
-export const RELAY_SOCKET_PATH = join(RUN_DIR, "relay.sock");
-
-// Re-export join inline since we need it for the path above
-import { join } from "node:path";
 
 // ── Wire Protocol (JSON-lines over Unix socket) ──────────────────────────────
 
@@ -72,6 +65,16 @@ export class RelayServer {
 	private server: Server | undefined;
 	private clients = new Map<Socket, ClientInfo>();
 
+	/** Thread IDs owned by the relay (local) instance.
+	 *  The relay polls getUpdates and is itself a session consumer.
+	 *  Without tracking its own threads, the relay can't distinguish
+	 *  "nobody owns this thread" (broadcast) from "I own this thread"
+	 *  (process locally, don't forward). */
+	private localSubscriptions = new Set<number>();
+
+	/** Whether the relay (local) instance is subscribed to General (threadId 0). */
+	private localSubscribedGeneral = false;
+
 	/** Start the relay server. Call after acquiring the lock. */
 	async start(): Promise<void> {
 		await ensureRunDir();
@@ -111,7 +114,7 @@ export class RelayServer {
 			});
 
 			socket.on("error", (err) => {
-				warn(`[telegram-relay] Client socket error: ${err.message}`);
+				log.warn({ err: err.message }, "Client socket error");
 				this.clients.delete(socket);
 			});
 
@@ -126,7 +129,7 @@ export class RelayServer {
 			server.on("error", reject);
 		});
 
-		log(`[telegram-relay] Listening on ${RELAY_SOCKET_PATH} (${this.clients.size} clients)`);
+		log.info({ path: RELAY_SOCKET_PATH }, "Relay server listening");
 	}
 
 	/** Route an update to subscribed clients. */
@@ -280,7 +283,7 @@ export class RelayClient {
 				const socket = createConnection(RELAY_SOCKET_PATH, () => {
 					this.socket = socket;
 					this.connected = true;
-					log("[telegram-relay] Connected to relay server");
+					log.info("Connected to relay server");
 
 					// Re-subscribe all known threads
 					this.resubscribe();
@@ -315,7 +318,7 @@ export class RelayClient {
 						clearInterval(this.pingInterval);
 						this.pingInterval = undefined;
 					}
-					warn("[telegram-relay] Disconnected from relay server");
+					log.warn("Disconnected from relay server");
 					// Guard against double-fire
 					const cb = this.onDisconnect;
 					this.onDisconnect = undefined;
@@ -323,7 +326,7 @@ export class RelayClient {
 				});
 
 				socket.on("error", (err) => {
-					warn(`[telegram-relay] Socket error: ${err.message}`);
+					log.warn({ err: err.message }, "Relay socket error");
 					if (!this.connected) {
 						resolve(false);
 					}
@@ -407,7 +410,7 @@ export class RelayClient {
 				break;
 			case "bye":
 				// Relay is shutting down - trigger failover
-				warn("[telegram-relay] Relay server is shutting down");
+				log.warn("Relay server is shutting down");
 				// Clear onDisconnect before disconnect to prevent double-fire from close event
 				const cb = this.onDisconnect;
 				this.onDisconnect = undefined;

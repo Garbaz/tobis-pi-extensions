@@ -74,7 +74,7 @@ Topics are named from the working directory basename on creation, then renamed t
 
 ### Media Processing
 
-Voice, photos, stickers, video, and documents are downloaded to the session's `media/` directory. If a processor is configured, the output (transcription, description, etc.) is included inline and echoed in the Telegram chat.
+Voice, photos, stickers, video, and documents are downloaded to a per-session media directory. If a processor is configured, the output (transcription, description, etc.) is included inline and echoed in the Telegram chat.
 
 Configure processors in `~/.pi/agent/extensions/pi-tobis-extensions/telegram.json`:
 
@@ -97,9 +97,7 @@ Files are always downloaded even without a processor — the agent can still acc
 
 ### Multi-Instance Relay
 
-When multiple pi processes share the same bot token, the first instance becomes the relay (poller + distributor) and others connect as clients via Unix socket. Outgoing messages always go direct to the Telegram API. If the relay crashes, a client takes over automatically.
-
-Relay state lives in `~/.pi/run/telegram/` (`relay.sock`, `relay.lock`, `state.json`).
+When multiple pi processes share the same bot token, the first instance becomes the relay (poller + distributor) and others connect as clients via Unix socket. Outgoing messages always go direct to the Telegram API. If the relay crashes, a client takes over automatically (no manual intervention needed).
 
 ### `telegram_send_file` Tool
 
@@ -118,9 +116,7 @@ Config file: `~/.pi/agent/extensions/pi-tobis-extensions/telegram.json`
 | `blacklist` | number[] | `[]` | Blocked user IDs |
 | `media` | object | `{}` | Per-type media processors |
 
-Session data (per-session, survives disconnects): `<sessionDir>/telegram-session.json`
 
-Runtime state (volatile): `~/.pi/run/telegram/state.json`
 
 ---
 

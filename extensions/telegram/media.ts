@@ -16,10 +16,28 @@ import { join, basename } from "node:path";
 const MAX_PROCESSOR_OUTPUT = 4000;
 
 // ── Session Media Dir ────────────────────────────────────────────────────────
+// Media directories are per-session, not per-CWD. They follow the same naming
+// convention as session companion files:
+//
+//   <timestamp>_<sessionId>.jsonl           (pi's session file)
+//   <timestamp>_<sessionId>-telegram.json   (telegram companion data)
+//   <timestamp>_<sessionId>-media/           (telegram media downloads)
+//
+// This avoids cross-talk when two pi instances share the same CWD.
+// Falls back to the session directory (per-CWD) if sessionFile is unavailable.
 
-/** Get or create the media directory within the session dir. */
-export async function getMediaDir(sessionDir: string): Promise<string> {
-	const dir = join(sessionDir, "media");
+/** Derive the per-session media directory from the session file path.
+ *  Returns undefined if sessionFile is undefined (in-memory session). */
+export function mediaDirPath(sessionFile: string | undefined): string | undefined {
+	if (!sessionFile) return undefined;
+	const base = sessionFile.replace(/\.jsonl$/, "");
+	return `${base}-media`;
+}
+
+/** Get or create the per-session media directory.
+ *  Uses the session-file-derived path if available, falls back to <sessionDir>/media. */
+export async function getMediaDir(sessionFile: string | undefined, fallbackDir: string): Promise<string> {
+	const dir = mediaDirPath(sessionFile) ?? join(fallbackDir, "media");
 	await mkdir(dir, { recursive: true });
 	return dir;
 }

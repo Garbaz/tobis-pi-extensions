@@ -2,9 +2,30 @@
 
 Custom pi extensions by Tobi.
 
-## Structure
+## What goes where
 
-- `extensions/` — pi extension entrypoints declared in `package.json`
+| File | Content |
+|------|---------|
+| **AGENTS.md** | Development instructions: how to build, conventions, coding rules, tool preferences. Things an agent needs to *do* correctly. |
+| **README.md** | User-facing docs: install, setup, commands, config schema, feature descriptions. Things a *user* needs to know. |
+| **ARCHITECTURE.md** | Design decisions that span multiple modules or involve tradeoffs not obvious from any single code location. Things you need to *understand* before changing code. |
+| **TODO.md** | Open questions, planned features, known bugs. Things not yet decided or implemented. |
+| **.agents/context/** | Reference knowledge about external systems. Read before working on related code. |
+
+What does **not** go in AGENTS.md:
+- Extension feature lists or module tables (those belong in README.md)
+- Architecture explanations or layer descriptions (those belong in ARCHITECTURE.md)
+- Open questions or planned work (those belong in TODO.md)
+- External system knowledge like pi API quirks or Telegram Bot API gotchas (those belong in `.agents/context/`)
+- Details replicated from other files (e.g. `package.json` fields, tsconfig settings) -- link or reference instead
+- Global conventions already covered by `~/.pi/agent/AGENTS.md` (tool preferences, uv run, trash, jq, etc.)
+
+## Context
+
+Before working on extension code or Telegram API calls, read the relevant reference:
+
+- **`.agents/context/pi-internals.md`** -- pi's ExtensionAPI, event lifecycle, session model, concurrency, gotchas. Read before touching `index.ts` event handlers or `ctx`/`pi` methods.
+- **`.agents/context/telegram-api.md`** -- Telegram Bot API quirks, HTML parse mode, rate limits, forum topics, message splitting. Read before touching `api.ts`, `outgoing.ts`, `bridge.ts`, or `polling.ts`.
 
 ## Adding a new extension
 
@@ -12,69 +33,43 @@ Custom pi extensions by Tobi.
 2. Add `"./extensions/<name>/index.ts"` to `package.json` → `pi.extensions`
 3. Update `README.md`
 
-## Current extensions
-
-- **telegram** — full Telegram ↔ Pi bridge (polling, reactions, streaming preview, media processing, forum topics, multi-instance relay, auth, HTML rendering, tool progress)
-- **checkpoint** — file-change snapshots via shadow git repository
-- **permissions** — companion for `@gotgenes/pi-permission-system` (dual-prompt bridge, runtime patching) *(placeholder — not yet implemented)*
-
 ## Conventions
 
-- Each extension is independently filterable via package filtering in settings
-- Peer dependencies (`@earendil-works/pi-*`, `typebox`) are provided by pi at runtime — do not add them to `dependencies`
-- All emoji in source code must use Unicode escape sequences (e.g. `\u{1F504}`) — literal emoji break the `edit` tool's exact text matching
-- Em dashes replaced with normal dashes in source code — avoids `edit` tool matching issues
-- Use `trash` instead of `rm` for deleting files
-- Use `uv run` for Python, `jq` for JSON
+- Peer dependencies (`@earendil-works/pi-*`, `typebox`) are provided by pi at runtime -- do not add them to `dependencies`
+- **Clean breaking changes in code, backward compatibility in data formats** -- when refactoring internal APIs, make the clean break in one pass: no deprecated aliases, no compat wrappers, no migration periods. Update all callers immediately, remove old exports in the same commit. However, user-facing data formats (config files, session files) must remain backward-compatible -- an extension update should never require users to manually rewrite config or fiddle with existing sessions.
+- **Document design decisions** at the right level of scope:
+  - **Local decisions** (affects one function, one file, one clear place in the code) -> inline comment explaining the "why" right where the code lives
+  - **Architectural decisions** (cross-cutting, spans multiple modules, involves tradeoffs) -> `ARCHITECTURE.md`
+- **Read before you change**: review `ARCHITECTURE.md` and inline comments in affected modules before making changes. Many decisions are non-obvious and span across the architecture -- skipping context risks reintroducing bugs the design explicitly avoids.
+- All emoji in source code must use Unicode escape sequences (e.g. `\u{1F504}`) -- literal emoji break the `edit` tool's exact text matching
+- Em dashes replaced with normal dashes in source code -- avoids `edit` tool matching issues
+- No non-null assertions (`!`) -- use local const bindings after null guards or optional chaining
+- No floating promises -- always `.catch(() => {})` on fire-and-forget
+- Default 30s timeout on all external API calls (60s for file downloads) via `AbortController`
+- No `console.*`/`process.stdout`/`process.stderr` in production code. Temporary debug prints during development must be removed before committing.
 
 ## Build & TypeScript
 
-- **Target**: ESM, Node >= 20.6 (matches pi's `engines` field). Our `package.json` has `"type": "module"`
-- **tsconfig**: `module: nodenext`, `moduleResolution: nodenext` — modern ESM-first, supports import attributes (`with { type: "json" }`)
-- **No bundling**: pi loads extensions via `jiti` (on-the-fly TS transpilation), so we only need `tsc --noEmit` for type-checking, not compilation
-- **Config schema**: `telegram.schema.json` is the single source of truth. `schema.ts` loads it and wraps TypeBox `Value.Check`/`Default`/`Errors` for runtime validation. Config files should include `$schema` for IDE autocomplete.
-- **TypeBox import**: `import { Type } from "typebox"`, `import { Check, Default, Errors } from "typebox/value"` — available as pi peer deps
+- No bundling: pi loads extensions via `jiti` (on-the-fly TS transpilation), so we only need `tsc --noEmit` for type-checking, not compilation
+- Config schema: `telegram.schema.json` is the single source of truth. `schema.ts` loads it and wraps TypeBox `Value.Check`/`Default`/`Errors` for runtime validation. Config files should include `$schema` for IDE autocomplete.
+- TypeBox import: `import { Type } from "typebox"`, `import { Check, Default, Errors } from "typebox/value"` -- available as pi peer deps
 
-## Telegram extension architecture
+## Logging
 
-### Module layout (~5,900 lines, zero external deps)
+- **pino** for structured file logging. Log file: `<agentDir>/run/telegram/log.jsonl` (NDJSON)
+- **Level control**: `PI_TELEGRAM_LOG` env var -- `info` (default), `debug`, `warn`, `debug:relay,session` (per-module), `off`
+- **Per-module child loggers**: `import { createLogger } from "./log.js"; const log = createLogger("relay");`
+- **User-facing notifications**: `notifyWarn()`/`notifyError()` from `log.ts` (goes through `ctx.ui.notify()` with stderr fallback). Not pino.
+- **Graceful shutdown**: pino uses async buffering (`sync: false`). `flushLogs()` is called in `shutdown()` and via `process.on("beforeExit")` to ensure buffered entries are written before exit.
 
-| Module | Purpose |
-|--------|---------|
-| `index.ts` | Extension factory (commands, events, tool/input hooks) |
-| `bridge.ts` | Orchestrator (incoming routing, outgoing dispatch, callback registry) |
-| `api.ts` | Telegram Bot API client (raw `fetch`, no library) |
-| `lifecycle.ts` | connect/disconnect/relay startup/shutdown |
-| `incoming.ts` | Message handling, auth, callback queries, bot commands |
-| `outgoing.ts` | Response streaming, tool progress, TUI echo, reactions, typing |
-| `topics.ts` | Forum topic CRUD + session data persistence |
-| `session.ts` | Topic setup, naming (CWD basename \u00B7 snippet on first message) |
-| `state.ts` | Centralized mutable state singleton |
-| `config.ts` | Config read/write/saveField, schema validation |
-| `media.ts` | Media download + processing pipeline |
-| `markdown.ts` | LLM markdown → Telegram HTML converter |
-| `formatting.ts` | Content formatters, emoji/label/hint helpers |
-| `tools.ts` | `telegram_send_file` tool registration + file send logic |
-| `polling.ts` | Long-polling loop with backoff |
-| `relay.ts` | Multi-instance relay server/client, PID-file election |
-| `relay-lock.ts` | PID-file lock for relay election |
-| `types.ts` | Telegram API type definitions |
-| `schema.ts` | TypeBox config validation (loads `telegram.schema.json`) |
-| `prompt.ts` | System prompt suffix builder |
-| `log.ts` | `notify()`/`notifyWarn()` + file-based `debugLog()` (`~/.pi/run/telegram/debug.log`) |
+## Paths
 
-### Key design decisions
+All path constants derive from `getAgentDir()` (imported from `@earendil-works/pi-coding-agent`), which respects `PI_CODING_AGENT_DIR`. No hardcoded `homedir()` + `.pi` paths. See `paths.ts` for the single source of truth.
 
-- **No external Telegram library** — raw `fetch` for Bot API calls
-- **Session data persistence**: `telegram-session.json` in session dir with `connected` boolean field (not file-existence sentinel). Topic data (`threadId`, `topicName`) preserved across disconnects. `saveSessionFields()` always reads-merges-writes — never full overwrite
-- **Config writes**: `saveConfigField(key, value)` — reads current file, updates one key, writes back. Prevents clobbering external edits
-- **HTML parse mode** for Telegram output (not MarkdownV2). Custom `convertToHtml()` in `markdown.ts`
-- **Tool sentinel pattern**: `\x00TOOL` markers for tool lines that pass through HTML conversion as raw HTML
-- **Auth**: whitelist/blacklist model. Unknown users get "waiting for authorization" + TUI notification. Blacklisted users silently ignored
-- **Bot commands**: `/status`, `/model`, `/new`, `/compact`, `/stop`
-- **Auto-connect only on resume/reload with `connected: true`** sentinel. New sessions require `/telegram connect`. Disconnect sets `connected: false` (preserving topic data)
-- **Immediate topic creation** on connect (not lazy). Topics named from CWD basename, then renamed to `basename \u00B7 snippet` on first user message (via `input` event, works for both TUI and Telegram input). One-shot rename via `topicRenamed` flag.
-- **Multi-instance relay**: first pi instance becomes relay (poller + distributor), others connect as clients via Unix socket
-- **Media processing**: `openai-stt`, `openai-chat`, `bash` protocols. Files always downloaded even without processor
-- **Turn buffer**: interleaved text blocks and tool lines, edited in-place for preview
-- **No `console.*`/`process.stdout`/`process.stderr`** — use `notify()` from `state.ts` (tries `ctx.ui.notify()`, falls back to stderr internally). For debug logging, use `debugLog()` from `log.ts` (appends to `~/.pi/run/telegram/debug.log`). Never write to stderr directly in production code; the `notify()` function handles the fallback path. Temporary debug stderr prints are OK during development but must be removed before committing.
+Layout under `getAgentDir()` (~/.pi/agent/ by default):
+
+```
+extensions/pi-tobis-extensions/telegram.json   config (user-editable)
+run/telegram/                                   runtime: log, relay, state
+sessions/--<cwd>--/.../...-media/               media downloads (per-session)
+```
