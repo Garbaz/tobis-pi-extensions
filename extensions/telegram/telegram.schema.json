@@ -1,0 +1,94 @@
+{
+	"$schema": "https://json-schema.org/draft-07/schema#",
+	"$id": "https://pi.earendil.works/schemas/telegram-config.json",
+	"title": "Telegram Bridge Configuration",
+	"description": "Configuration for the pi-tobis-extensions Telegram bridge. Add \"$schema\": \"https://pi.earendil.works/schemas/telegram-config.json\" to your telegram.json for IDE validation.",
+	"type": "object",
+	"additionalProperties": false,
+	"properties": {
+		"botToken": {
+			"type": "string",
+			"description": "Telegram bot token from @BotFather (e.g. \"123456:ABC-DEF...\")."
+		},
+		"allowedUserId": {
+			"type": "integer",
+			"description": "Primary authorized user ID. Auto-set on first pairing."
+		},
+		"whitelist": {
+			"type": "array",
+			"items": { "type": "integer" },
+			"description": "Pre-approved user IDs. Users not on this list trigger a confirmation prompt in the Pi TUI."
+		},
+		"blacklist": {
+			"type": "array",
+			"items": { "type": "integer" },
+			"description": "Blocked user IDs. Blacklisted users are silently ignored."
+		},
+		"topics": {
+			"type": "boolean",
+			"description": "Enable forum topics for per-session routing. Default: true.",
+			"default": true
+		},
+		"media": {
+			"type": "object",
+			"description": "Media processors keyed by Telegram message type. Set to null to explicitly disable a type.",
+			"additionalProperties": false,
+			"properties": {
+				"voice": { "$ref": "#/$defs/mediaProcessorOrNull" },
+				"audio": { "$ref": "#/$defs/mediaProcessorOrNull" },
+				"photo": { "$ref": "#/$defs/mediaProcessorOrNull" },
+				"sticker": { "$ref": "#/$defs/mediaProcessorOrNull" },
+				"video": { "$ref": "#/$defs/mediaProcessorOrNull" },
+				"video_note": { "$ref": "#/$defs/mediaProcessorOrNull" },
+				"animation": { "$ref": "#/$defs/mediaProcessorOrNull" },
+				"document": { "$ref": "#/$defs/mediaProcessorOrNull" }
+			}
+		}
+	},
+	"$defs": {
+		"mediaProcessor": {
+			"type": "object",
+			"description": "Configuration for processing a Telegram media type.",
+			"required": ["api"],
+			"additionalProperties": false,
+			"properties": {
+				"url": {
+					"type": "string",
+					"description": "API endpoint URL (not used by bash mode)."
+				},
+				"api": {
+					"type": "string",
+					"enum": ["openai-stt", "openai-chat", "bash"],
+					"description": "Request/response format: openai-stt (speech-to-text), openai-chat (vision/chat), bash (shell command with {file})."
+				},
+				"model": {
+					"type": "string",
+					"description": "Model name (used by openai-stt and openai-chat)."
+				},
+				"api_key": {
+					"type": "string",
+					"description": "API key sent as Bearer token."
+				},
+				"prompt": {
+					"type": "string",
+					"description": "System/user prompt for openai-chat."
+				},
+				"command": {
+					"type": "string",
+					"description": "Shell command template for bash mode. {file} is replaced with the downloaded file path."
+				},
+				"timeout": {
+					"type": "integer",
+					"minimum": 1000,
+					"description": "Timeout in milliseconds. Default: 30000."
+				}
+			}
+		},
+		"mediaProcessorOrNull": {
+			"oneOf": [
+				{ "$ref": "#/$defs/mediaProcessor" },
+				{ "type": "null", "description": "Explicitly disable processing for this media type." }
+			]
+		}
+	}
+}

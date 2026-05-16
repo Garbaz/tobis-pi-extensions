@@ -5,11 +5,16 @@
 // Config = user-editable persistent settings (botToken, allowedUserId, media).
 // State  = runtime cursor that changes on every message (lastUpdateId).
 // Keeping them separate prevents the session from clobbering hand-edited config.
+//
+// Schema validation: telegram.schema.json is the single source of truth.
+// TypeBox Value.Check/Default/Errors provide runtime validation.
+// Semantic validation (bash {file} placeholder, API url/model) is separate.
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import type { TelegramConfig, MediaProcessor, MediaType } from "./types.js";
+import { checkConfig, applyDefaults, validateConfig as schemaValidate } from "./schema.js";
 import { ensureRunDir, RUN_DIR } from "./relay-lock.js";
 
 const CONFIG_DIR = join(homedir(), ".pi", "agent", "extensions", "pi-tobis-extensions");
@@ -27,6 +32,8 @@ const DEFAULT_CONFIG: TelegramConfig = {
 	whitelist: undefined,
 	blacklist: undefined,
 };
+
+// ── Migration Helpers ────────────────────────────────────────────────────────
 
 /** Migrate legacy inboundHandlers format to media format. */
 function migrateLegacyConfig(raw: Record<string, unknown>): void {
@@ -61,19 +68,40 @@ function migrateWhitelist(raw: Record<string, unknown>): void {
 	raw.whitelist = [raw.allowedUserId];
 }
 
+/** Run all migrations and sanitization on a raw config object. */
+function migrateAndClean(raw: Record<string, unknown>): void {
+	migrateLegacyConfig(raw);
+	migrateWhitelist(raw);
+	stripRuntimeFields(raw);
+}
+
 // ── Config (user-editable settings) ──────────────────────────────────────────
 
-/** Read config from disk. Returns defaults if file doesn't exist. */
+/** Read config from disk. Applies schema defaults and migrations.
+ *  Returns warnings for schema violations (never throws on bad config). */
 export async function readConfig(): Promise<TelegramConfig> {
+	let raw: Record<string, unknown>;
 	try {
-		const raw = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
-		migrateLegacyConfig(raw);
-		migrateWhitelist(raw);
-		stripRuntimeFields(raw);
-		return { ...DEFAULT_CONFIG, ...raw };
+		raw = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
 	} catch {
 		return { ...DEFAULT_CONFIG };
 	}
+
+	migrateAndClean(raw);
+
+	// Apply schema defaults (e.g. topics: true)
+	const withDefaults = applyDefaults(raw) as Record<string, unknown>;
+
+	// Validate against schema and collect warnings
+	const errors = schemaValidate(withDefaults);
+	if (errors.length > 0) {
+		// Log warnings to stderr - config still loads with best-effort
+		for (const err of errors) {
+			process.stderr.write(`[telegram] config warning: ${err}\n`);
+		}
+	}
+
+	return { ...DEFAULT_CONFIG, ...withDefaults };
 }
 
 /** Persist a single config field. Reads current file, updates one key, writes back.
@@ -147,10 +175,13 @@ export async function saveLastUpdateId(lastUpdateId: number): Promise<void> {
 	await writeFile(STATE_PATH, JSON.stringify({ lastUpdateId }, null, "\t") + "\n", "utf8");
 }
 
-// ── Auth Helpers ──────────────────────────────────────────────────────────────
+// ── Semantic Validation ──────────────────────────────────────────────────────
+// Schema validation checks types/structure. Semantic validation checks that
+// the config values make sense (e.g. bash commands contain {file}).
 
 /** Validate media processor config at load time.
- *  Checks that bash processors have a command template containing {file}.
+ *  Checks that bash processors have a command template containing {file},
+ *  and that API processors have url or model configured.
  *  Returns an array of warning messages for invalid processors. */
 export function validateMediaConfig(config: TelegramConfig): string[] {
 	const warnings: string[] = [];
@@ -173,6 +204,8 @@ export function validateMediaConfig(config: TelegramConfig): string[] {
 	}
 	return warnings;
 }
+
+// ── Auth Helpers ──────────────────────────────────────────────────────────────
 
 /** Check if a user ID is authorized based on whitelist/blacklist/allowedUserId.
  *  - blacklisted → denied

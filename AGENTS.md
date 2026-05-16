@@ -27,6 +27,14 @@ Custom pi extensions by Tobi.
 - Use `trash` instead of `rm` for deleting files
 - Use `uv run` for Python, `jq` for JSON
 
+## Build & TypeScript
+
+- **Target**: ESM, Node >= 20.6 (matches pi's `engines` field). Our `package.json` has `"type": "module"`
+- **tsconfig**: `module: nodenext`, `moduleResolution: nodenext` — modern ESM-first, supports import attributes (`with { type: "json" }`)
+- **No bundling**: pi loads extensions via `jiti` (on-the-fly TS transpilation), so we only need `tsc --noEmit` for type-checking, not compilation
+- **Config schema**: `telegram.schema.json` is the single source of truth. `schema.ts` loads it and wraps TypeBox `Value.Check`/`Default`/`Errors` for runtime validation. Config files should include `$schema` for IDE autocomplete.
+- **TypeBox import**: `import { Type } from "typebox"`, `import { Check, Default, Errors } from "typebox/value"` — available as pi peer deps
+
 ## Telegram extension architecture
 
 ### Module layout (~5,900 lines, zero external deps)
@@ -42,7 +50,7 @@ Custom pi extensions by Tobi.
 | `topics.ts` | Forum topic CRUD + session data persistence |
 | `session.ts` | Topic setup, naming (CWD basename \u00B7 snippet on first message) |
 | `state.ts` | Centralized mutable state singleton |
-| `config.ts` | Config read/write/saveField |
+| `config.ts` | Config read/write/saveField, schema validation |
 | `media.ts` | Media download + processing pipeline |
 | `markdown.ts` | LLM markdown → Telegram HTML converter |
 | `formatting.ts` | Content formatters, emoji/label/hint helpers |
@@ -51,6 +59,7 @@ Custom pi extensions by Tobi.
 | `relay.ts` | Multi-instance relay server/client, PID-file election |
 | `relay-lock.ts` | PID-file lock for relay election |
 | `types.ts` | Telegram API type definitions |
+| `schema.ts` | TypeBox config validation (loads `telegram.schema.json`) |
 | `prompt.ts` | System prompt suffix builder |
 | `log.ts` | No-op logger (stdout is TUI) |
 

@@ -46,6 +46,8 @@ export interface IncomingDeps {
 export interface FormattedMessage {
 	text: string;
 	unprocessed: MediaType[];
+	/** Optional echo to send in the Telegram chat after processing (e.g. media transcription/description). */
+	mediaEcho?: string;
 }
 
 /** Result from handling an incoming update that produced a forwarded message. */
@@ -280,10 +282,22 @@ async function handleMessage(
 	if (!result) return undefined; // No actionable content
 
 	// Ensure the forum topic exists (fallback in case it wasn't created on connect)
-	await ensureTopicCreated();
+	const threadId = await ensureTopicCreated();
 
 	// Rename topic from CWD basename to "basename \u00B7 snippet" on first user message
 	await renameTopicFromMessage(result.text);
+
+	// Echo media processor output to the Telegram chat so the user can see
+	// what the bot understood from the photo/voice/etc.
+	if (result.mediaEcho) {
+		const chatId = message.chat.id;
+		void api.sendMessage({
+			chat_id: chatId,
+			text: result.mediaEcho,
+			message_thread_id: threadId,
+			disable_notification: true,
+		}).catch(() => {});
+	}
 
 	// Always use "followUp" for safety - if the agent is idle, it starts a new turn;
 	// if busy, it queues. No ctx.isIdle() check needed (avoids stale ctx issue).
@@ -381,7 +395,10 @@ async function formatMessageContent(
 			}
 
 			// Consistent layout: emoji + filepath, then processor output on next line
-			return { text: formatIncomingText(`${emoji} ${localPath}\n\n${truncated}${caption}`, isEdit), unprocessed };
+			// Include media echo for visible feedback in the Telegram chat
+			const echoPreview = truncated.length > 800 ? truncated.slice(0, 800) + "\u{2026}" : truncated;
+			const mediaEcho = `${emoji} ${echoPreview}`;
+			return { text: formatIncomingText(`${emoji} ${localPath}\n\n${truncated}${caption}`, isEdit), unprocessed, mediaEcho };
 		} catch (err) {
 			// Clear processing indicator on error too (best-effort)
 			const ctx = safeCtx(currentSession()?.ctx);
