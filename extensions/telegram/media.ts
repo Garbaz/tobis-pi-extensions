@@ -7,7 +7,13 @@ import type { Message, MediaType, MediaProcessor } from "./types.js";
 import { mediaEmoji, mediaLabel, mediaNoProcessorHint } from "./formatting.js";
 import { execFile } from "node:child_process";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, basename } from "node:path";
+
+// ── Processor Output Limits ──────────────────────────────────────────────────
+
+/** Maximum processor output included inline in the agent message (characters).
+ *  Longer output is truncated and the full result written to a .processor.txt file. */
+const MAX_PROCESSOR_OUTPUT = 4000;
 
 // ── Session Media Dir ────────────────────────────────────────────────────────
 
@@ -104,7 +110,7 @@ export async function downloadMediaFile(
 	const response = await api.downloadFile(file.file_path);
 	const buffer = new Uint8Array(await response.arrayBuffer());
 
-	// Determine extension — prefer server-assigned from file_path (most reliable),
+	// Determine extension - prefer server-assigned from file_path (most reliable),
 	// then mime_type, then default per media type
 	const serverExt = file.file_path.split(".").pop()?.toLowerCase();
 	const mimeExt = extFromMime(mimeType ?? defaultMimeType(mediaType), "bin");
@@ -121,12 +127,27 @@ export async function downloadMediaFile(
 }
 
 /** Build a placeholder string for a media type with no processor configured.
- *  Format: `<EMOJI> <FILEPATH>\n[No <type> handler configured — <hint>]`
+ *  Format: `<EMOJI> <FILEPATH>\n[No <type> handler configured - <hint>]`
  *  localPath is the downloaded file path so the agent can still access it. */
 export function mediaPlaceholder(type: MediaType, _message: Message, localPath: string): string {
 	const emoji = mediaEmoji(type);
 	const hint = mediaNoProcessorHint(type);
-	return `${emoji} ${localPath}\n[No ${mediaLabel(type)} handler configured — ${hint}]`;
+	return `${emoji} ${localPath}\n[No ${mediaLabel(type)} handler configured - ${hint}]`;
+}
+
+/** Truncate processor output if it exceeds MAX_PROCESSOR_OUTPUT.
+ *  Writes the full output to a `.processor.txt` file next to the media file.
+ *  Returns the truncated text with a pi-style notice pointing to the full file.
+ *  If output fits within the limit, returns it unchanged. */
+export async function truncateProcessorOutput(output: string, mediaFilePath: string): Promise<string> {
+	if (output.length <= MAX_PROCESSOR_OUTPUT) return output;
+
+	// Write full output to .processed.txt next to the media file
+	const processorPath = mediaFilePath + ".processed.txt";
+	await writeFile(processorPath, output, "utf-8");
+
+	const shown = output.slice(0, MAX_PROCESSOR_OUTPUT);
+	return `${shown}\n\n[Showing first ${MAX_PROCESSOR_OUTPUT} of ${output.length} characters. Full output: ${processorPath}]`;
 }
 
 // ── Protocol Handlers ────────────────────────────────────────────────────────
@@ -255,7 +276,7 @@ async function handleOpenaiChat(processor: MediaProcessor, filePath: string): Pr
  *  Bash processor contract:
  *  - Exit 0 → stdout = result text (success, including empty/zero results)
  *  - Exit non-zero → failure; stdout+stderr included in error message
- *  - "No result" is NOT a failure — exit 0 with a descriptive message (e.g. "[no speech detected]")
+ *  - "No result" is NOT a failure - exit 0 with a descriptive message (e.g. "[no speech detected]")
  */
 async function handleBash(processor: MediaProcessor, filePath: string): Promise<string> {
 	const command = (processor.command ?? "").replace("{file}", filePath);

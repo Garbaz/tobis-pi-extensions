@@ -1,9 +1,10 @@
 // ── Telegram Bot API Client ─────────────────────────────────────────────────
-// Thin typed wrapper over raw fetch — zero dependencies.
+// Thin typed wrapper over raw fetch - zero dependencies.
 
 import type {
 	TelegramApiResponse,
 	BotUser,
+	Chat,
 	ForumTopic,
 	Update,
 	Message,
@@ -17,6 +18,12 @@ import type {
 // ── Rate-limit backoff ───────────────────────────────────────────────────────
 
 const MAX_RETRIES = 3;
+
+/** Default timeout for API calls (ms). Prevents hung fetch() from blocking. */
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+/** Default timeout for file downloads (ms). Larger because files can be big. */
+const DOWNLOAD_TIMEOUT_MS = 60_000;
 
 async function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -35,44 +42,60 @@ export class TelegramApi {
 
 	// ── Core request methods ─────────────────────────────────────────────────
 
-	/** JSON POST to the Telegram API with automatic retry on 429. */
+	/** JSON POST to the Telegram API with automatic retry on 429.
+	 *  Applies a default timeout when no external signal is provided. */
 	private async call<T>(method: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
 		const url = `${this.baseUrl}/bot${this.token}/${method}`;
-		for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-			const response = await fetch(url, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify(body),
-				signal,
-			});
-			const data = (await response.json()) as TelegramApiResponse<T>;
 
-			if (data.ok && data.result !== undefined) {
-				return data.result;
-			}
-
-			// Retry on 429 with backoff
-			if (data.error_code === 429 && data.parameters?.retry_after && attempt < MAX_RETRIES) {
-				await sleep(data.parameters.retry_after * 1000);
-				continue;
-			}
-
-			// Migrate to supergroup
-			if (data.parameters?.migrate_to_chat_id !== undefined) {
-				throw new TelegramApiError(
-					method,
-					data.error_code ?? -1,
-					`Chat migrated to supergroup ${data.parameters.migrate_to_chat_id}`,
-					data.description,
-				);
-			}
-
-			throw new TelegramApiError(method, data.error_code ?? -1, data.description ?? "Unknown error", data.description);
+		// Apply default timeout when no external signal is provided
+		let timeoutController: AbortController | undefined;
+		let effectiveSignal: AbortSignal | undefined = signal;
+		if (!signal) {
+			timeoutController = new AbortController();
+			effectiveSignal = timeoutController.signal;
+			setTimeout(() => timeoutController?.abort(), DEFAULT_TIMEOUT_MS);
 		}
-		throw new TelegramApiError(method, 429, "Too Many Requests (exhausted retries)", "retry_after exhausted");
+
+		try {
+			for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+				const response = await fetch(url, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(body),
+					signal: effectiveSignal,
+				});
+				const data = (await response.json()) as TelegramApiResponse<T>;
+
+				if (data.ok && data.result !== undefined) {
+					return data.result;
+				}
+
+				// Retry on 429 with backoff
+				if (data.error_code === 429 && data.parameters?.retry_after && attempt < MAX_RETRIES) {
+					await sleep(data.parameters.retry_after * 1000);
+					continue;
+				}
+
+				// Migrate to supergroup
+				if (data.parameters?.migrate_to_chat_id !== undefined) {
+					throw new TelegramApiError(
+						method,
+						data.error_code ?? -1,
+						`Chat migrated to supergroup ${data.parameters.migrate_to_chat_id}`,
+						data.description,
+					);
+				}
+
+				throw new TelegramApiError(method, data.error_code ?? -1, data.description ?? "Unknown error", data.description);
+			}
+			throw new TelegramApiError(method, 429, "Too Many Requests (exhausted retries)", "retry_after exhausted");
+		} finally {
+			timeoutController?.abort(); // Clear timeout if we finished before it fired
+		}
 	}
 
-	/** Multipart/form-data POST for file uploads. */
+	/** Multipart/form-data POST for file uploads.
+	 *  Applies a default timeout when no external signal is provided. */
 	private async callMultipart<T>(
 		method: string,
 		fields: Record<string, string | number | boolean>,
@@ -88,32 +111,59 @@ export class TelegramApi {
 		}
 		form.set(fileField, fileData, fileName);
 
-		for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-			const response = await fetch(url, { method: "POST", body: form, signal });
-			const data = (await response.json()) as TelegramApiResponse<T>;
-
-			if (data.ok && data.result !== undefined) {
-				return data.result;
-			}
-
-			if (data.error_code === 429 && data.parameters?.retry_after && attempt < MAX_RETRIES) {
-				await sleep(data.parameters.retry_after * 1000);
-				continue;
-			}
-
-			throw new TelegramApiError(method, data.error_code ?? -1, data.description ?? "Upload failed", data.description);
+		// Apply default timeout when no external signal is provided
+		let timeoutController: AbortController | undefined;
+		let effectiveSignal: AbortSignal | undefined = signal;
+		if (!signal) {
+			timeoutController = new AbortController();
+			effectiveSignal = timeoutController.signal;
+			setTimeout(() => timeoutController?.abort(), DEFAULT_TIMEOUT_MS);
 		}
-		throw new TelegramApiError(method, 429, "Too Many Requests (exhausted retries)", "retry_after exhausted");
+
+		try {
+			for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+				const response = await fetch(url, { method: "POST", body: form, signal: effectiveSignal });
+				const data = (await response.json()) as TelegramApiResponse<T>;
+
+				if (data.ok && data.result !== undefined) {
+					return data.result;
+				}
+
+				if (data.error_code === 429 && data.parameters?.retry_after && attempt < MAX_RETRIES) {
+					await sleep(data.parameters.retry_after * 1000);
+					continue;
+				}
+
+				throw new TelegramApiError(method, data.error_code ?? -1, data.description ?? "Upload failed", data.description);
+			}
+			throw new TelegramApiError(method, 429, "Too Many Requests (exhausted retries)", "retry_after exhausted");
+		} finally {
+			timeoutController?.abort();
+		}
 	}
 
-	/** Download a file from Telegram's file server. */
+	/** Download a file from Telegram's file server.
+	 *  Applies a 60s default timeout (files can be large). */
 	async downloadFile(filePath: string, signal?: AbortSignal): Promise<Response> {
 		const url = `${this.baseUrl}/file/bot${this.token}/${filePath}`;
-		const response = await fetch(url, { signal });
-		if (!response.ok) {
-			throw new TelegramApiError("downloadFile", response.status, `HTTP ${response.status}`, undefined);
+
+		let timeoutController: AbortController | undefined;
+		let effectiveSignal: AbortSignal | undefined = signal;
+		if (!signal) {
+			timeoutController = new AbortController();
+			effectiveSignal = timeoutController.signal;
+			setTimeout(() => timeoutController?.abort(), DOWNLOAD_TIMEOUT_MS);
 		}
-		return response;
+
+		try {
+			const response = await fetch(url, { signal: effectiveSignal });
+			if (!response.ok) {
+				throw new TelegramApiError("downloadFile", response.status, `HTTP ${response.status}`, undefined);
+			}
+			return response;
+		} finally {
+			timeoutController?.abort();
+		}
 	}
 
 	// ── Bot info ─────────────────────────────────────────────────────────────
@@ -254,7 +304,10 @@ export class TelegramApi {
 		chat_id: number | string;
 		voice: { data: Blob; filename: string };
 		caption?: string;
-		parse_mode?: "MarkdownV2" | "HTML" | "Markdown";
+		parse_mode?:
+			| "MarkdownV2"
+			| "HTML"
+			| "Markdown";
 		duration?: number;
 		reply_parameters?: ReplyParameters;
 		disable_notification?: boolean;
@@ -337,7 +390,7 @@ export class TelegramApi {
 
 	// ── Chat info ────────────────────────────────────────────────────────────
 
-	getChat(chat_id: number | string, signal?: AbortSignal): Promise<unknown> {
+	getChat(chat_id: number | string, signal?: AbortSignal): Promise<Chat> {
 		return this.call("getChat", { chat_id }, signal);
 	}
 

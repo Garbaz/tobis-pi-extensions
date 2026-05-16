@@ -1,58 +1,31 @@
 // ── Telegram Relay ───────────────────────────────────────────────────────────
-// Shared polling for multiple pi instances using one bot token.
+// Wire protocol for multi-instance polling over Unix sockets.
 //
 // Architecture:
-//   - First instance to acquire the flock becomes the RELAY (poller).
+//   - First instance to acquire the lock becomes the RELAY (poller).
 //   - Other instances become CLIENTS (subscribe via Unix socket).
 //   - Relay polls getUpdates and routes each Update to the client
 //     subscribed to that thread ID (or to all clients for General/unroutable).
-//   - Outgoing messages (sendMessage, etc.) go directly from each client —
+//   - Outgoing messages (sendMessage, etc.) go directly from each client -
 //     no relay needed for outgoing.
-//   - On relay crash: flock auto-releases, first client to detect takes over.
+//   - On relay crash: lock becomes stale, first client to detect takes over.
 //
-// File layout (~/.pi/run/telegram/):
-//   relay.sock   — Unix domain socket for IPC
-//   relay.lock   — flock file for relay election
-//   state.json   — lastUpdateId polling cursor (moved from /tmp)
+// See relay-lock.ts for election logic and config.ts for state persistence.
 
 import { createServer, createConnection, type Server, type Socket } from "node:net";
-import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
-import { join } from "node:path";
-import { homedir, tmpdir } from "node:os";
-import { open, type FileHandle } from "node:fs/promises";
+import { unlink } from "node:fs/promises";
 import type { Update, Message } from "./types.js";
-import { log, warn, error } from "./log.js";
+import { ensureRunDir, RUN_DIR } from "./relay-lock.js";
+import { log, warn, notifyError } from "./log.js";
+import { saveLastUpdateId } from "./config.js";
 
 // ── Paths ────────────────────────────────────────────────────────────────────
 
-const RUN_DIR = join(homedir(), ".pi", "run", "telegram");
+/** Path to the Unix domain socket for IPC. */
 export const RELAY_SOCKET_PATH = join(RUN_DIR, "relay.sock");
-const RELAY_LOCK_PATH = join(RUN_DIR, "relay.lock");
-export const STATE_PATH = join(RUN_DIR, "state.json");
 
-/** Legacy state path (pre-relay, in /tmp). Used for migration. */
-const OLD_STATE_PATH = join(tmpdir(), "pi-telegram-state.json");
-
-async function ensureRunDir(): Promise<void> {
-	await mkdir(RUN_DIR, { recursive: true });
-}
-
-/** Migrate state file from /tmp to ~/.pi/run/telegram/ if the new location doesn't exist yet. */
-async function migrateStateFile(): Promise<void> {
-	try {
-		await readFile(STATE_PATH, "utf8");
-		return; // New location exists — no migration needed
-	} catch {
-		// New location doesn't exist — try to migrate from old location
-	}
-	try {
-		const oldData = await readFile(OLD_STATE_PATH, "utf8");
-		await writeFile(STATE_PATH, oldData, "utf8");
-		log(`[telegram] Migrated state file from ${OLD_STATE_PATH} to ${STATE_PATH}`);
-	} catch {
-		// Old file doesn't exist either — nothing to migrate
-	}
-}
+// Re-export join inline since we need it for the path above
+import { join } from "node:path";
 
 // ── Wire Protocol (JSON-lines over Unix socket) ──────────────────────────────
 
@@ -82,129 +55,9 @@ function decode(line: string): RelayMessage | undefined {
 }
 
 /** Extract the thread ID from an update for routing. Returns 0 for General/no-thread. */
-function threadIdFromUpdate(update: Update): number {
+export function threadIdFromUpdate(update: Update): number {
 	const msg = (update.message || update.edited_message) as Message | undefined;
 	return msg?.message_thread_id ?? 0;
-}
-
-// ── Flock-based Election ─────────────────────────────────────────────────────
-
-let lockHandle: FileHandle | undefined;
-
-/** Try to acquire an exclusive, non-blocking flock on the relay lock file.
- *  Returns true if we got the lock (we should become the relay). */
-export async function tryAcquireRelayLock(): Promise<boolean> {
-	await ensureRunDir();
-	try {
-		lockHandle = await open(RELAY_LOCK_PATH, "w");
-		// fcntl F_SETLK with F_WRLCK | F_UNLCK via Node fs locking
-		// Node's flock() uses fcntl(F_SETLK) on Linux, LockFileEx on Windows
-		// We use the "exclusive" flag which is non-blocking on Linux
-		await lockHandle.sync(); // ensure file exists on disk
-		// Node doesn't expose flock(2) directly. We use a workaround:
-		// Open with O_EXCL would work for creation, but we need the lock
-		// to auto-release on process death. Instead, we use a PID check
-		// combined with a write lock via the `flock` utility or Node's
-		// internal mechanism.
-		//
-		// Actually, the correct Node.js approach is to use `fs-ext` or
-		// our own native binding for flock(2). But to avoid deps, we
-		// use a PID-file approach with stale-detection:
-		const pid = process.pid;
-		const lockData = JSON.stringify({ pid, startedAt: Date.now() }) + "\n";
-		await lockHandle.write(lockData, 0, "utf8");
-		await lockHandle.sync();
-
-		// Check if another process holds the lock by reading the file
-		// and verifying the PID is alive
-		const existingData = await readFile(RELAY_LOCK_PATH, "utf8").catch(() => "");
-		let existing: { pid: number; startedAt: number } | undefined;
-		try {
-			existing = JSON.parse(existingData.trim());
-		} catch {
-			// Corrupt or empty — we can take it
-		}
-
-		if (existing && existing.pid !== pid) {
-			// Is that process still alive?
-			if (isProcessAlive(existing.pid)) {
-				// Another relay is running — close our handle, fail
-				await lockHandle.close();
-				lockHandle = undefined;
-				return false;
-			}
-			// Stale lock — overwrite it
-			warn(`[telegram-relay] Stale lock from PID ${existing.pid} — taking over`);
-		}
-
-		// We have the lock — write our PID
-		await lockHandle.write(lockData, 0, "utf8");
-		await lockHandle.sync();
-		return true;
-	} catch (err) {
-		// Can't acquire — another process has it
-		lockHandle?.close().catch(() => {});
-		lockHandle = undefined;
-		return false;
-	}
-}
-
-/** Release the relay lock (on clean shutdown). */
-export async function releaseRelayLock(): Promise<void> {
-	if (lockHandle) {
-		try {
-			await lockHandle.close();
-		} catch {
-			// Best effort
-		}
-		lockHandle = undefined;
-	}
-	try {
-		await unlink(RELAY_LOCK_PATH).catch(() => {});
-	} catch {
-		// Best effort
-	}
-}
-
-/** Check if a process is alive. */
-function isProcessAlive(pid: number): boolean {
-	try {
-		// signal 0 = existence check (doesn't actually send a signal)
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-/** Read the PID from the lock file. Returns undefined if no valid lock. */
-export async function readRelayLockPid(): Promise<number | undefined> {
-	try {
-		const data = JSON.parse(await readFile(RELAY_LOCK_PATH, "utf8"));
-		return typeof data.pid === "number" ? data.pid : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-// ── State Persistence ────────────────────────────────────────────────────────
-
-/** Read lastUpdateId from state file. Returns undefined if no state exists. */
-export async function readLastUpdateId(): Promise<number | undefined> {
-	await ensureRunDir();
-	await migrateStateFile();
-	try {
-		const raw = JSON.parse(await readFile(STATE_PATH, "utf8"));
-		return typeof raw.lastUpdateId === "number" ? raw.lastUpdateId : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-/** Persist lastUpdateId to state file. */
-export async function saveLastUpdateId(lastUpdateId: number): Promise<void> {
-	await ensureRunDir();
-	await writeFile(STATE_PATH, JSON.stringify({ lastUpdateId }, null, "\t") + "\n", "utf8");
 }
 
 // ── Relay Server ─────────────────────────────────────────────────────────────
@@ -218,18 +71,16 @@ interface ClientInfo {
 export class RelayServer {
 	private server: Server | undefined;
 	private clients = new Map<Socket, ClientInfo>();
-	private onUpdate: ((update: Update, threadId: number) => void) | undefined;
 
-	/** Start the relay server. Call after acquiring the flock. */
-	async start(onUpdate: (update: Update, threadId: number) => void): Promise<void> {
-		this.onUpdate = onUpdate;
+	/** Start the relay server. Call after acquiring the lock. */
+	async start(): Promise<void> {
 		await ensureRunDir();
 
 		// Clean up stale socket file from previous relay
 		try {
 			await unlink(RELAY_SOCKET_PATH);
 		} catch {
-			// File doesn't exist — fine
+			// File doesn't exist - fine
 		}
 
 		this.server = createServer((socket) => {
@@ -269,8 +120,10 @@ export class RelayServer {
 		});
 
 		await new Promise<void>((resolve, reject) => {
-			this.server!.listen(RELAY_SOCKET_PATH, () => resolve());
-			this.server!.on("error", reject);
+			const server = this.server;
+			if (!server) { reject(new Error("Relay server not initialized")); return; }
+			server.listen(RELAY_SOCKET_PATH, () => resolve());
+			server.on("error", reject);
 		});
 
 		log(`[telegram-relay] Listening on ${RELAY_SOCKET_PATH} (${this.clients.size} clients)`);
@@ -280,7 +133,7 @@ export class RelayServer {
 	routeUpdate(update: Update): void {
 		const threadId = threadIdFromUpdate(update);
 
-		// my_chat_member updates (pairing/unblocking) — broadcast to all
+		// my_chat_member updates (pairing/unblocking) - broadcast to all
 		if (update.my_chat_member) {
 			for (const [socket] of this.clients) {
 				this.send(socket, { type: "update", threadId: 0, data: update });
@@ -297,7 +150,7 @@ export class RelayServer {
 			}
 		}
 
-		// General topic (threadId 0) or no subscriber — send to General subscribers
+		// General topic (threadId 0) or no subscriber - send to General subscribers
 		if (!routed || threadId === 0) {
 			for (const [socket, client] of this.clients) {
 				if (client.subscribedGeneral && !client.subscriptions.has(threadId)) {
@@ -324,6 +177,16 @@ export class RelayServer {
 		return false;
 	}
 
+	/** Whether the relay should skip local processing for this update.
+	 *  Returns true if a relay client owns this thread (meaning the client
+	 *  will handle it), unless it's a my_chat_member update (always processed
+	 *  locally AND routed). */
+	shouldSkipLocal(update: Update): boolean {
+		if (update.my_chat_member) return false; // always process locally
+		const threadId = threadIdFromUpdate(update);
+		return this.hasSubscriber(threadId);
+	}
+
 	/** Broadcast the current polling cursor to all clients (for failover). */
 	broadcastCursor(offset: number): void {
 		for (const [socket] of this.clients) {
@@ -340,8 +203,9 @@ export class RelayServer {
 		this.clients.clear();
 
 		if (this.server) {
+			const server = this.server;
 			await new Promise<void>((resolve) => {
-				this.server!.close(() => resolve());
+				server.close(() => resolve());
 			});
 			this.server = undefined;
 		}
@@ -383,7 +247,7 @@ export class RelayServer {
 		try {
 			socket.write(encode(msg));
 		} catch {
-			// Socket probably closed — will be cleaned up on 'close' event
+			// Socket probably closed - will be cleaned up on 'close' event
 		}
 	}
 }
@@ -501,6 +365,11 @@ export class RelayClient {
 
 	/** Disconnect from the relay. */
 	disconnect(): void {
+		// Clear callbacks before destroying the socket to prevent
+		// the 'close' event from triggering failover on deliberate disconnect
+		this.onDisconnect = undefined;
+		this.onUpdate = undefined;
+
 		if (this.reconnectTimer) {
 			clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = undefined;
@@ -521,23 +390,23 @@ export class RelayClient {
 		switch (msg.type) {
 			case "update":
 				if (msg.data && this.onUpdate) {
-					// Fire and forget — errors handled by the bridge
+					// Fire and forget - errors handled by the bridge
 					Promise.resolve(this.onUpdate(msg.data)).catch((err) => {
-						error("[telegram-relay] Error handling routed update:", err);
+						notifyError(`Relay update error: ${err instanceof Error ? err.message : String(err)}`);
 					});
 				}
 				break;
 			case "cursor":
-				// Relay is sharing its polling offset — save for failover
+				// Relay is sharing its polling offset - save for failover
 				if (msg.offset !== undefined) {
 					saveLastUpdateId(msg.offset).catch(() => {});
 				}
 				break;
 			case "pong":
-				// Keepalive response — nothing to do
+				// Keepalive response - nothing to do
 				break;
 			case "bye":
-				// Relay is shutting down — trigger failover
+				// Relay is shutting down - trigger failover
 				warn("[telegram-relay] Relay server is shutting down");
 				// Clear onDisconnect before disconnect to prevent double-fire from close event
 				const cb = this.onDisconnect;
@@ -563,7 +432,7 @@ export class RelayClient {
 		try {
 			this.socket?.write(encode(msg));
 		} catch {
-			// Socket closed — will be cleaned up on 'close' event
+			// Socket closed - will be cleaned up on 'close' event
 		}
 	}
 }

@@ -1,20 +1,37 @@
 // ── Logging ──────────────────────────────────────────────────────────────────
-// Pi's TUI renders stdout directly, so console.log/warn/error pollutes the
-// display. Use these helpers instead — they silently drop non-critical messages
-// and only surface truly fatal errors via console.error (which should crash).
+// Pi's TUI renders stdout directly - console.log/warn/error pollutes the display.
+//
+// NEVER use console.* or process.stdout from this extension.
+//
+// log() / warn() - silently dropped (no-ops).
+// notifyError() / notifyWarn() - user-visible via Pi's notification system.
+//   These use state.notify() which tries currentSession()?.ctx first,
+//   then falls back to stderr - never silent.
+//
+// For code that already has a fresh ctx (from a Pi event handler parameter),
+// prefer using ctx.ui.notify() directly - it's guaranteed to work.
 
-/** Debug/info message — silently dropped. Use ctx.ui.notify for user-visible messages. */
+import { notify, updateStatus } from "./state.js";
+
+/** Debug/info message - silently dropped. Use notify() or ctx.ui.notify for user-visible messages. */
 export function log(_message: string): void {
-	// Intentionally empty — pi's TUI must not be polluted
+	// Intentionally empty - pi's TUI must not be polluted
 }
 
-/** Warning message — silently dropped. These are expected in normal operation. */
+/** Warning message - silently dropped. Use notifyWarn() for user-visible warnings. */
 export function warn(_message: string): void {
-	// Intentionally empty — pi's TUI must not be polluted
+	// Intentionally empty - pi's TUI must not be polluted
 }
 
-/** Error that should never happen — log it since it indicates a bug. */
-export function error(message: string, err?: unknown): void {
-	const detail = err instanceof Error ? err.message : err ? String(err) : "";
-	process.stderr.write(`[telegram] ${message}${detail ? ": " + detail : ""}\n`);
+/** Show an error notification to the user.
+ *  Uses currentSession()?.ctx if available, falls back to stderr. */
+export function notifyError(message: string): void {
+	notify(`Telegram: ${message}`, "error");
+	updateStatus(message);
+}
+
+/** Show a warning notification to the user.
+ *  Uses currentSession()?.ctx if available, falls back to stderr. */
+export function notifyWarn(message: string): void {
+	notify(`Telegram: ${message}`, "warning");
 }

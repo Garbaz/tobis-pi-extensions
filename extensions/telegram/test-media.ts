@@ -30,7 +30,6 @@ import type {
 	PhotoSize,
 	Video,
 	VideoNote,
-	Animation,
 	Document,
 	Sticker,
 	Location,
@@ -106,7 +105,7 @@ const audioMsg: Message = { ...baseMessage, audio: { file_id: "audio123", file_u
 const photoMsg: Message = { ...baseMessage, photo: [{ file_id: "photo_sm", file_unique_id: "up1", width: 90, height: 90 }, { file_id: "photo_lg", file_unique_id: "up2", width: 800, height: 600 }] as PhotoSize[] };
 const videoMsg: Message = { ...baseMessage, video: { file_id: "video123", file_unique_id: "uv2", width: 1920, height: 1080, duration: 30, mime_type: "video/mp4", file_name: "clip.mp4" } as Video };
 const videoNoteMsg: Message = { ...baseMessage, video_note: { file_id: "vn123", file_unique_id: "uvn", length: 240, duration: 15 } as VideoNote };
-const animMsg: Message = { ...baseMessage, animation: { file_id: "anim123", file_unique_id: "ua2", width: 320, height: 240, duration: 3, file_name: "animation.gif.mp4", mime_type: "video/mp4" } as Animation };
+const animMsg: Message = { ...baseMessage, animation: { file_id: "anim123", file_unique_id: "ua2", width: 320, height: 240, duration: 3, file_name: "animation.gif.mp4", mime_type: "video/mp4" } };
 const docMsg: Message = { ...baseMessage, document: { file_id: "doc123", file_unique_id: "ud", file_name: "report.pdf", mime_type: "application/pdf" } as Document };
 const stickerMsg: Message = { ...baseMessage, sticker: { file_id: "sticker123", file_unique_id: "us", width: 512, height: 512, is_animated: false, is_video: false, type: "regular", emoji: "😀" } as Sticker };
 
@@ -279,7 +278,7 @@ class MockTelegramApi extends TelegramApi {
 	}
 
 	override async downloadFile(_filePath: string): Promise<Response> {
-		return new Response(this.mockFileContent, { status: 200 });
+		return new Response(Buffer.from(this.mockFileContent), { status: 200 });
 	}
 }
 
@@ -674,6 +673,7 @@ with open('${pdfPath}', 'wb') as f: f.write(pdf)
 	} catch (err) {
 		// Fallback: try pandoc to generate a PDF
 		try {
+			const { execSync } = await import("node:child_process");
 			execSync(`pandoc -o "${pdfPath}" --pdf-engine=pdflatex <<< "Hello from PDF test"`, { stdio: "pipe", timeout: 10000 });
 			assert(existsSync(pdfPath), "generated test PDF with pandoc");
 		} catch {

@@ -2,15 +2,25 @@
 // Orchestrates incoming (Telegram → Pi) and outgoing (Pi → Telegram) message
 // flow. Delegates to incoming.ts and outgoing.ts for the heavy lifting.
 // Supports forum topics for multi-session routing (Bot API 9.4+).
+// Provides a callback query registry for extensions (e.g., permissions).
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TelegramApi } from "./api.js";
-import type { Message, Update, TelegramConfig, MediaType } from "./types.js";
-import { handleUpdate, type IncomingResult } from "./incoming.js";
+import type { Message, Update, TelegramConfig, MediaType, CallbackQuery } from "./types.js";
+import { handleUpdate, type IncomingDeps, type IncomingResult } from "./incoming.js";
 import { OutgoingHandler } from "./outgoing.js";
+import type { PendingFile } from "./tools.js";
 import { TopicManager } from "./topics.js";
-import { detectContentTypes, senderName } from "./formatting.js";
-import { escapeMarkdownV2 } from "./markdown.js";
+import { detectContentTypes, senderName, extractText } from "./formatting.js";
+
+// ── Callback Query Handler ────────────────────────────────────────────────────
+// Extensions can register handlers for callback queries by prefix.
+// When a callback_query arrives, the bridge dispatches to the first handler
+// whose prefix matches the callback data. Unhandled queries are answered
+// with a generic response.
+
+/** Handler for a Telegram callback query. Return true to consume, false to pass. */
+export type CallbackHandler = (query: CallbackQuery, api: TelegramApi) => Promise<boolean>;
 
 // ── Turn Context ──────────────────────────────────────────────────────────────
 // Carried from handleMessage to before_agent_start so the injected system prompt
@@ -21,15 +31,15 @@ export interface TelegramTurnContext {
 	username: string | undefined;
 	/** Content types present in the message. */
 	types: import("./formatting.js").ContentType[];
-	/** Media types that had no processor configured — raw file only, no transcription/description. */
+	/** Media types that had no processor configured - raw file only, no transcription/description. */
 	unprocessed: MediaType[];
 }
 
 // ── Bridge Callbacks ────────────────────────────────────────────────────────
 
 export interface BridgeCallbacks {
-	/** Called when a user pairs with the bot for the first time. Config is already updated. */
-	onPair: (userId: number, userName: string) => void | Promise<void>;
+	/** Called when a user is accepted (from whitelist or first auto-pair). Config is already updated. */
+	onAccept: (userId: number, userName: string) => void | Promise<void>;
 	/** Called when the bridge locks to a chat. */
 	onChatLock: () => void;
 	/** Called when the bridge unlocks from a chat. */
@@ -56,7 +66,7 @@ export class TelegramBridge {
 	/** The chat ID currently locked to the Pi session. */
 	private activeChatId: number | undefined;
 
-	/** Forum topic manager — one per chat. */
+	/** Forum topic manager - one per chat. */
 	private topicManager: TopicManager | undefined;
 
 	/** Context about the Telegram message that triggered the current turn.
@@ -64,15 +74,36 @@ export class TelegramBridge {
 	 *  cleared after injection so it doesn't leak into non-Telegram turns. */
 	private _lastTelegramContext: TelegramTurnContext | undefined;
 
+	/** Registered callback query handlers, keyed by prefix (e.g. "perm:"). */
+	private callbackHandlers = new Map<string, CallbackHandler>();
+
+	/** Cached IncomingDeps - constructed once, reused on every handleUpdate call. */
+	private incomingDeps: IncomingDeps;
+
 	constructor(api: TelegramApi, config: TelegramConfig, pi: ExtensionAPI, callbacks: BridgeCallbacks) {
 		this.api = api;
 		this.config = config;
 		this.pi = pi;
 		this.callbacks = callbacks;
 		this.activeOutgoing = new OutgoingHandler(api);
+
+		// Build incoming deps - closures capture `this` for live access to bridge state
+		// Build incoming deps - closures capture `this` (the bridge) for live access.
+		// Note: activeChatId MUST be a closure reading from the bridge, NOT a getter
+		// on the deps object (plain object getters read `this` = the deps object itself).
+		const bridge = this;
+		this.incomingDeps = {
+			api: this.api,
+			config: this.config,
+			pi: this.pi,
+			get activeChatId() { return bridge.activeChatId; },
+			lockToChat: (chatId: number) => bridge.lockToChat(chatId),
+			unlock: () => bridge.unlock(),
+			onAccept: (userId: number, userName: string) => bridge.callbacks.onAccept(userId, userName),
+		};
 	}
 
-	/** Get and clear the last Telegram turn context — used by before_agent_start to inject prompt, then cleared. */
+	/** Get and clear the last Telegram turn context - used by before_agent_start to inject prompt, then cleared. */
 	consumeTelegramContext(): TelegramTurnContext | undefined {
 		const ctx = this._lastTelegramContext;
 		this._lastTelegramContext = undefined;
@@ -132,10 +163,10 @@ export class TelegramBridge {
 
 	/** Register a session with a forum topic. Creates the topic if topics are enabled.
 	 *  Returns the thread ID, or undefined if topics are disabled. */
-	async registerSession(sessionId: string, sessionName: string, signal?: AbortSignal): Promise<number | undefined> {
+	async registerSession(sessionId: string, sessionName: string, signal?: AbortSignal, iconColor?: number): Promise<number | undefined> {
 		if (!this.topicManager) return undefined;
 
-		const threadId = await this.topicManager.createTopic(sessionId, sessionName, signal);
+		const threadId = await this.topicManager.createTopic(sessionId, sessionName, signal, iconColor);
 		if (threadId !== undefined) {
 			// Create an outgoing handler for this session
 			const outgoing = new OutgoingHandler(this.api);
@@ -163,7 +194,7 @@ export class TelegramBridge {
 		return restoredThreadId;
 	}
 
-	/** Unregister a session — close and remove its forum topic. */
+	/** Unregister a session - close and remove its forum topic. */
 	async unregisterSession(sessionId: string, signal?: AbortSignal): Promise<void> {
 		if (this.topicManager) {
 			await this.topicManager.closeTopic(sessionId, signal);
@@ -192,68 +223,33 @@ export class TelegramBridge {
 	// ── Incoming: Telegram → Pi ──────────────────────────────────────────────
 
 	/** Handle an incoming Telegram update. */
-	async handleUpdate(update: Update, ctx: ExtensionContext): Promise<void> {
-		const result = await handleUpdate(
-			update,
-			this.api,
-			this.config,
-			this.pi,
-			this.activeChatId,
-			(chatId: number) => this.lockToChat(chatId),
-			() => this.unlock(),
-			(userId: number, userName: string) => this.callbacks.onPair(userId, userName),
-			ctx,
-		);
+	async handleUpdate(update: Update): Promise<void> {
+		// Dispatch callback queries to registered handlers first
+		if (update.callback_query) {
+			const consumed = await this.dispatchCallbackQuery(update.callback_query);
+			if (consumed) return;
+			// Unhandled - answer generically
+			try {
+				await this.api.answerCallbackQuery({ callback_query_id: update.callback_query.id, text: "Received" });
+			} catch { /* non-critical */ }
+			return;
+		}
+
+		const result = await handleUpdate(update, this.incomingDeps);
 
 		if (result) {
-			// Route to the correct outgoing handler based on thread ID
 			const msg = (update.message || update.edited_message) as Message | undefined;
-			const isGeneralTopic = msg && this.topicManager && !msg.message_thread_id;
 
-			if (msg && this.topicManager) {
-				const sessionId = this.topicManager.getSessionByThread(msg.message_thread_id);
-				if (sessionId) {
-					this.activateSession(sessionId);
-				} else if (isGeneralTopic && this.currentSessionId) {
-					// Message in General topic — route to current session but send a hint
-					this.activateSession(this.currentSessionId);
-					const sessionTopic = this.topicManager.getSessionTopic(this.currentSessionId);
-					const rawName = sessionTopic?.name ?? "this session";
-					const escapedName = escapeMarkdownV2(rawName);
-					try {
-						await this.api.sendMessage({
-							chat_id: result.chatId,
-							text: `_Routed to_ ${escapedName}`,
-							parse_mode: "MarkdownV2",
-						});
-					} catch {
-						// Markdown parse failure — try plain text
-						try {
-							await this.api.sendMessage({
-								chat_id: result.chatId,
-							text: `Routed to: ${rawName}`,
-							});
-						} catch {
-							// Non-critical
-						}
-					}
-				}
-			}
+			// Route to the correct session's outgoing handler
+			// For General-topic messages, this echoes the message into the session thread
+			const echoMessageId = await this.routeToSession(msg, result.chatId);
 
-			// Set ⏳ reaction on the user's message
-			await this.activeOutgoing.setReaction(result.chatId, result.messageId, "⏳");
+			// Set \u23f3 reaction and track for completion
+			// If the message was echoed (General topic), use the echo's message_id for reply
+			this.trackUserMessage(result.chatId, echoMessageId ?? result.messageId);
 
-			// Remember for completion reaction
-			this.activeOutgoing.setLastUserMessage(result.chatId, result.messageId);
-
-			// Extract the message for turn context detection
-			if (msg) {
-				this._lastTelegramContext = {
-					username: senderName(msg),
-					types: detectContentTypes(msg),
-					unprocessed: (result as IncomingResult).unprocessed,
-				};
-			}
+			// Store turn context for system prompt injection
+			this.setTurnContext(msg, result);
 		}
 	}
 
@@ -282,5 +278,138 @@ export class TelegramBridge {
 	/** Stop the typing indicator. */
 	stopTypingIndicator(): void {
 		this.activeOutgoing.stopTypingIndicator();
+	}
+
+	/** Queue a file for sending on the next agent_end. */
+	queueFile(file: PendingFile): void {
+		this.activeOutgoing.queueFile(file);
+	}
+
+	/** Echo a TUI-originated user message to Telegram. */
+	async sendUserEcho(text: string): Promise<void> {
+		await this.activeOutgoing.sendUserEcho(text);
+	}
+
+	/** Called when a tool starts executing. */
+	async onToolExecutionStart(toolName: string, args: Record<string, unknown>): Promise<void> {
+		await this.activeOutgoing.onToolExecutionStart(toolName, args);
+	}
+
+	/** Called when a tool finishes executing. */
+	onToolExecutionEnd(toolName: string, args: Record<string, unknown>, isError: boolean): void {
+		this.activeOutgoing.onToolExecutionEnd(toolName, args, isError);
+	}
+
+	/** Register a callback query handler for a given prefix.
+	 *  When a callback_query arrives whose data starts with `prefix`, the handler
+	 *  is called. Return `true` to consume (query answered), `false` to pass.
+	 *  Returns an unsubscribe function. */
+	registerCallbackHandler(prefix: string, handler: CallbackHandler): () => void {
+		this.callbackHandlers.set(prefix, handler);
+		return () => { this.callbackHandlers.delete(prefix); };
+	}
+
+	/** Dispatch a callback query to registered handlers. Returns true if consumed. */
+	async dispatchCallbackQuery(query: CallbackQuery): Promise<boolean> {
+		const data = query.data;
+		if (!data) return false;
+
+		for (const [prefix, handler] of this.callbackHandlers) {
+			if (data.startsWith(prefix)) {
+				const consumed = await handler(query, this.api);
+				if (consumed) return true;
+			}
+		}
+		return false;
+	}
+
+	// ── Private: Incoming post-processing ─────────────────────────────────────
+
+	/** Route an incoming message to the correct session's outgoing handler
+	 *  based on forum topic thread ID. For General topic messages, echoes the
+	 *  message into the session thread so the reply chain is in the right topic.
+	 *  Returns the echo message ID (if echoed), or undefined. */
+	private async routeToSession(msg: Message | undefined, chatId: number): Promise<number | undefined> {
+		if (!msg || !this.topicManager) return undefined;
+
+		const sessionId = this.topicManager.getSessionByThread(msg.message_thread_id);
+		const isGeneralTopic = !msg.message_thread_id;
+
+		if (sessionId) {
+			this.activateSession(sessionId);
+			return undefined;
+		} else if (isGeneralTopic && this.currentSessionId) {
+			// Message in General topic - route to current session and echo into the thread
+			this.activateSession(this.currentSessionId);
+
+			const outgoing = this.outgoingBySession.get(this.currentSessionId);
+			if (!outgoing) return undefined;
+
+			// Get text from the General-topic message for echoing
+			const text = extractText(msg);
+			if (!text) {
+				// Media-only message - send a generic echo so the reply chain is in the right thread
+				const types = detectContentTypes(msg);
+				const label = types.length > 0 ? types[0] : "message";
+				try {
+					const echoMsg = await this.api.sendMessage({
+						chat_id: chatId,
+						text: `\u{1F464} [${label}]`,
+						message_thread_id: outgoing.getThreadId(),
+						disable_notification: true,
+					});
+
+					// React to the General-topic message to signal routing
+					void this.api.setMessageReaction({
+						chat_id: chatId,
+						message_id: msg.message_id,
+						reaction: [{ type: "emoji", emoji: "\u{1F440}" }],
+					}).catch(() => { /* non-critical */ });
+
+					return echoMsg.message_id;
+				} catch {
+					return undefined;
+				}
+			}
+
+			try {
+				const echoMsg = await this.api.sendMessage({
+					chat_id: chatId,
+					text: `\u{1F464} ${text}`,
+					message_thread_id: outgoing.getThreadId(),
+					disable_notification: true,
+				});
+
+				// React to the General-topic message to signal routing (silent, no text clutter)
+				void this.api.setMessageReaction({
+					chat_id: chatId,
+					message_id: msg.message_id,
+					reaction: [{ type: "emoji", emoji: "\u{1F440}" }],
+				}).catch(() => { /* non-critical */ });
+
+				return echoMsg.message_id;
+			} catch {
+				// Non-critical - echo is best-effort
+				return undefined;
+			}
+		}
+		return undefined;
+	}
+
+	/** Set reaction on user message and track it for completion reaction. */
+	private trackUserMessage(chatId: number, messageId: number): void {
+		void this.activeOutgoing.setReaction(chatId, messageId, "\u{23F3}").catch(() => {});
+		this.activeOutgoing.setLastUserMessage(chatId, messageId);
+	}
+
+	/** Store turn context from the incoming message for system prompt injection. */
+	private setTurnContext(msg: Message | undefined, result: IncomingResult): void {
+		if (msg) {
+			this._lastTelegramContext = {
+				username: senderName(msg),
+				types: detectContentTypes(msg),
+				unprocessed: result.unprocessed,
+			};
+		}
 	}
 }

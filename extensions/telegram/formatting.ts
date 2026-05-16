@@ -3,7 +3,7 @@
 
 import type { Message, Location, Venue, Contact, Dice, Poll, MediaType } from "./types.js";
 
-/** Format a text message from Telegram for Pi. No prefix — the system prompt tells the agent the source. */
+/** Format a text message from Telegram for Pi. No prefix - the system prompt tells the agent the source. */
 export function formatIncomingText(text: string, isEdit: boolean): string {
 	if (isEdit) return text + "\n[edited]";
 	return text;
@@ -22,17 +22,17 @@ export function senderName(message: Message): string | undefined {
 /** Content types detectable in a Telegram message. */
 export type ContentType = "text" | "voice" | "audio" | "photo" | "video" | "video_note" | "animation" | "document" | "sticker" | "location" | "contact" | "dice" | "poll" | "caption";
 
-/** Emoji for each media type — used in formatted output and status bar. */
+/** Emoji for each media type - used in formatted output and status bar. */
 export function mediaEmoji(type: MediaType): string {
 	switch (type) {
-		case "voice": return "🎙️";
-		case "audio": return "🎵";
-		case "photo": return "🖼️";
-		case "sticker": return "🎭";
-		case "video": return "🎬";
-		case "video_note": return "🎬";
-		case "animation": return "🎞️";
-		case "document": return "📄";
+		case "voice": return "\u{1F3A4}\u{FE0F}";
+		case "audio": return "\u{1F3B5}";
+		case "photo": return "\u{1F5BC}\u{FE0F}";
+		case "sticker": return "\u{1F3AD}";
+		case "video": return "\u{1F3AC}";
+		case "video_note": return "\u{1F3AC}";
+		case "animation": return "\u{1F39E}\u{FE0F}";
+		case "document": return "\u{1F4C4}";
 	}
 }
 
@@ -88,7 +88,7 @@ export function detectContentTypes(message: Message): ContentType[] {
 export function formatLocation(location: Location): string {
 	const { latitude, longitude } = location;
 	const mapUrl = `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}#map=17/${latitude}/${longitude}`;
-	let text = `📍 Location: ${latitude}, ${longitude}`;
+	let text = `\u{1F4CD} Location: ${latitude}, ${longitude}`;
 	if (location.live_period) {
 		const mins = Math.round(location.live_period / 60);
 		text += ` (live for ${mins}min)`;
@@ -100,7 +100,7 @@ export function formatLocation(location: Location): string {
 
 /** Format a venue (named location) as a text message. */
 export function formatVenue(venue: Venue): string {
-	let text = `📍 Venue: ${venue.title}\n${venue.address}`;
+	let text = `\u{1F4CD} Venue: ${venue.title}\n${venue.address}`;
 	if (venue.foursquare_id) text += `\nFoursquare: ${venue.foursquare_id}`;
 	const mapUrl = `https://www.openstreetmap.org/?mlat=${venue.location.latitude}&mlon=${venue.location.longitude}#map=17/${venue.location.latitude}/${venue.location.longitude}`;
 	text += `\n${mapUrl}`;
@@ -109,9 +109,9 @@ export function formatVenue(venue: Venue): string {
 
 /** Format a shared contact as a text message. */
 export function formatContact(contact: Contact): string {
-	let text = `👤 Contact: ${contact.first_name}`;
+	let text = `\u{1F464} Contact: ${contact.first_name}`;
 	if (contact.last_name) text += ` ${contact.last_name}`;
-	text += `\n📱 ${contact.phone_number}`;
+	text += `\n\u{1F4F1} ${contact.phone_number}`;
 	if (contact.vcard) text += `\n[vCard attached]`;
 	return text;
 }
@@ -125,10 +125,10 @@ export function formatDice(dice: Dice): string {
 export function formatPoll(poll: Poll): string {
 	const typeLabel = poll.type === "quiz" ? "Quiz" : "Poll";
 	const status = poll.is_closed ? " [closed]" : "";
-	let text = `📊 ${typeLabel}: ${poll.question}${status}`;
+	let text = `\u{1F4CA} ${typeLabel}: ${poll.question}${status}`;
 	for (const opt of poll.options) {
 		const marker = poll.correct_option_id !== undefined && poll.options[poll.correct_option_id] === opt ? "✓" : " ";
-		text += `\n ${marker} ${opt.text} — ${opt.voter_count} vote${opt.voter_count !== 1 ? "s" : ""}`;
+		text += `\n ${marker} ${opt.text} - ${opt.voter_count} vote${opt.voter_count !== 1 ? "s" : ""}`;
 	}
 	text += `\nTotal: ${poll.total_voter_count} voter${poll.total_voter_count !== 1 ? "s" : ""}`;
 	if (poll.is_anonymous) text += " (anonymous)";

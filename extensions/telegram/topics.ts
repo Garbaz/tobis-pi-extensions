@@ -5,24 +5,28 @@
 
 import type { TelegramApi } from "./api.js";
 import type { ForumTopic } from "./types.js";
-import { warn } from "./log.js";
+import { notifyWarn } from "./log.js";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
 // ── Session Persistence ─────────────────────────────────────────────────────
 // Persists session telegram state to the session directory so connections
 // survive reloads and resumes. File: <sessionDir>/telegram-session.json
-// If this file exists, the session was connected to telegram.
-// If threadId is present, the session has a forum topic to resume.
+// The `connected` field is the explicit sentinel — true when connected,
+// false or absent after disconnect. threadId/threadName are kept across
+// disconnects so reconnecting can resume the same topic.
 
 export interface TelegramSessionData {
+	/** Whether this session is currently connected to Telegram.
+	 *  true = auto-reconnect on resume/reload. false = explicitly disconnected. */
+	connected?: boolean;
 	/** Forum topic thread ID (present if topics are enabled). */
 	threadId?: number;
 	/** Forum topic name (present if topics are enabled). */
 	threadName?: string;
 }
 
-/** Read persisted session data. Returns undefined if not connected to telegram. */
+/** Read persisted session data. Returns undefined if the file doesn't exist. */
 export async function readSessionData(sessionDir: string): Promise<TelegramSessionData | undefined> {
 	try {
 		const raw = await readFile(join(sessionDir, "telegram-session.json"), "utf-8");
@@ -32,20 +36,19 @@ export async function readSessionData(sessionDir: string): Promise<TelegramSessi
 	}
 }
 
-/** Write session data (marks this session as connected to telegram). */
-export async function writeSessionData(sessionDir: string, data: TelegramSessionData): Promise<void> {
+/** Write full session data (overwrites the file). Internal only - never export.
+ *  All external callers must use saveSessionFields to avoid clobbering. */
+async function writeSessionData(sessionDir: string, data: TelegramSessionData): Promise<void> {
 	await mkdir(sessionDir, { recursive: true });
 	await writeFile(join(sessionDir, "telegram-session.json"), JSON.stringify(data, null, 2), "utf-8");
 }
 
-/** Delete session data (marks this session as disconnected from telegram). */
-export async function deleteSessionData(sessionDir: string): Promise<void> {
-	try {
-		const { unlink } = await import("node:fs/promises");
-		await unlink(join(sessionDir, "telegram-session.json"));
-	} catch {
-		// File may not exist — ignore
-	}
+/** Update session data fields without clobbering others.
+ *  Reads the current file, merges the new values, and writes back. */
+export async function saveSessionFields(sessionDir: string, fields: Partial<TelegramSessionData>): Promise<void> {
+	const existing = await readSessionData(sessionDir) ?? {};
+	Object.assign(existing, fields);
+	await writeSessionData(sessionDir, existing);
 }
 
 export interface SessionTopic {
@@ -55,6 +58,14 @@ export interface SessionTopic {
 	name: string;
 	/** Whether the topic is currently open (false = closed). */
 	isOpen: boolean;
+}
+
+/** Check if a Telegram API error is "not a supergroup forum" - meaning
+ *  the chat doesn't support forum topics. This is expected in private chats
+ *  or non-forum groups and should be handled silently. */
+function isNotSupergroupForum(err: unknown): boolean {
+	const msg = err instanceof Error ? err.message : String(err);
+	return msg.includes("not a supergroup forum");
 }
 
 // ── Topic Manager ────────────────────────────────────────────────────────────
@@ -88,7 +99,7 @@ export class TopicManager {
 	}
 
 	/** Create a forum topic for a session. Returns the thread ID, or undefined if topics are disabled. */
-	async createTopic(sessionId: string, name: string, signal?: AbortSignal): Promise<number | undefined> {
+	async createTopic(sessionId: string, name: string, signal?: AbortSignal, iconColor?: number): Promise<number | undefined> {
 		if (!this.topicsEnabled) return undefined;
 
 		// Truncate name to 128 chars (Telegram limit)
@@ -98,6 +109,7 @@ export class TopicManager {
 			const topic: ForumTopic = await this.api.createForumTopic({
 				chat_id: this.chatId,
 				name: topicName,
+				icon_color: iconColor,
 			}, signal);
 
 			this.sessions.set(sessionId, {
@@ -109,11 +121,15 @@ export class TopicManager {
 
 			return topic.message_thread_id;
 		} catch (err) {
-			// Topic creation failed — fall back to no-topic mode for this session
-			const msg = err instanceof Error ? err.message : String(err);
-			warn(`[telegram] Failed to create forum topic "${topicName}": ${msg}`);
-			return undefined;
+			if (isNotSupergroupForum(err)) {
+				// Chat doesn't support forum topics - disable and fall back
+				this.topicsEnabled = false;
+				return undefined;
 			}
+			const msg = err instanceof Error ? err.message : String(err);
+			notifyWarn(`Failed to create forum topic "${topicName}": ${msg}`);
+			return undefined;
+		}
 	}
 
 	/** Restore a previously created topic for a session (e.g., on reload/resume).
@@ -132,15 +148,15 @@ export class TopicManager {
 		// Reopen the topic (it was closed on session_shutdown)
 		try {
 			await this.api.reopenForumTopic(this.chatId, threadId, signal);
-			this.sessions.get(sessionId)!.isOpen = true;
+			const session = this.sessions.get(sessionId);
+			if (session) session.isOpen = true;
 		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			warn(`[telegram] Failed to reopen forum topic "${name}" (thread ${threadId}): ${msg}`);
-			// Even if reopen fails, the topic is still registered — messages may still work
+			if (isNotSupergroupForum(err)) {
+				// Chat doesn't support forum topics - disable and continue without topics
+				this.topicsEnabled = false;
+			}
+			// Topic is still registered even if reopen failed - messages may still work
 		}
-
-		// Rename if the session label changed while we were away
-		// (caller will handle rename tracking)
 
 		return threadId;
 	}
@@ -154,8 +170,9 @@ export class TopicManager {
 			await this.api.closeForumTopic(this.chatId, session.threadId, signal);
 			session.isOpen = false;
 		} catch (err) {
+			if (isNotSupergroupForum(err)) return; // expected in non-forum chats
 			const msg = err instanceof Error ? err.message : String(err);
-			warn(`[telegram] Failed to close forum topic "${session.name}": ${msg}`);
+			notifyWarn(`Failed to close forum topic "${session.name}": ${msg}`);
 		}
 	}
 
@@ -168,8 +185,9 @@ export class TopicManager {
 			await this.api.reopenForumTopic(this.chatId, session.threadId, signal);
 			session.isOpen = true;
 		} catch (err) {
+			if (isNotSupergroupForum(err)) return; // expected in non-forum chats
 			const msg = err instanceof Error ? err.message : String(err);
-			warn(`[telegram] Failed to reopen forum topic "${session.name}": ${msg}`);
+			notifyWarn(`Failed to reopen forum topic "${session.name}": ${msg}`);
 		}
 	}
 
@@ -181,8 +199,9 @@ export class TopicManager {
 		try {
 			await this.api.deleteForumTopic(this.chatId, session.threadId, signal);
 		} catch (err) {
+			if (isNotSupergroupForum(err)) return; // expected in non-forum chats
 			const msg = err instanceof Error ? err.message : String(err);
-			warn(`[telegram] Failed to delete forum topic "${session.name}": ${msg}`);
+			notifyWarn(`Failed to delete forum topic "${session.name}": ${msg}`);
 		}
 
 		this.threadToSession.delete(session.threadId);
@@ -204,8 +223,9 @@ export class TopicManager {
 			}, signal);
 			session.name = topicName;
 		} catch (err) {
+			if (isNotSupergroupForum(err)) return; // expected in non-forum chats
 			const msg = err instanceof Error ? err.message : String(err);
-			warn(`[telegram] Failed to rename forum topic to "${topicName}": ${msg}`);
+			notifyWarn(`Failed to rename forum topic to "${topicName}": ${msg}`);
 		}
 	}
 
@@ -251,7 +271,7 @@ export class TopicManager {
 			await this.api.hideGeneralForumTopic(this.chatId, signal);
 		} catch {
 			// Not supported in private chats (400: "the chat is not a supergroup forum")
-			// This is expected — silently ignore
+			// This is expected - silently ignore
 		}
 	}
 }

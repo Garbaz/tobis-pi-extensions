@@ -440,15 +440,16 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("pi-checkpoint: no session active", "warning");
 				return;
 			}
+			const mgr = manager;
 
-			await manager.init();
+			await mgr.init();
 			const [sub, ...rest] = args.trim().split(/\s+/);
 
 			// Default: interactive browser (like /fork)
 			if (!sub || sub === "list") {
 				if (!ctx.hasUI) {
 					// Non-interactive fallback: grouped text listing
-					const { turns, entries } = manager.listCheckpoints();
+					const { turns, entries } = mgr.listCheckpoints();
 					if (entries.length === 0 && turns.length === 0) {
 						ctx.ui.notify("No checkpoints yet. Checkpoints are created automatically before file edits.", "info");
 						return;
@@ -461,7 +462,7 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
-				await interactiveCheckpointRestore(manager, ctx);
+				await interactiveCheckpointRestore(mgr, ctx);
 				return;
 			}
 
@@ -469,7 +470,7 @@ export default function (pi: ExtensionAPI) {
 			switch (sub) {
 				case "log": {
 					const count = rest[0] ? parseInt(rest[0], 10) : 20;
-					const log = await manager.getLog(count);
+					const log = await mgr.getLog(count);
 					ctx.ui.notify(log || "No commits in checkpoint repo", "info");
 					return;
 				}
@@ -481,8 +482,8 @@ export default function (pi: ExtensionAPI) {
 					}
 					try {
 						const diff = rest[1]
-							? await manager.getDiffRange(rest[0], rest[1])
-							: await manager.getDiff(rest[0]);
+							? await mgr.getDiffRange(rest[0], rest[1])
+							: await mgr.getDiff(rest[0]);
 						if (!diff.trim()) {
 							ctx.ui.notify("No changes", "info");
 							return;
@@ -508,7 +509,7 @@ export default function (pi: ExtensionAPI) {
 							ctx.ui.notify(`Invalid turn tag '${ref}'. Expected format: turn-N`, "error");
 							return;
 						}
-						const { entries } = manager.listCheckpoints();
+						const { entries } = mgr.listCheckpoints();
 						const turnEntries = entries.filter((e) => (e.turn ?? 0) === turnNum);
 						if (turnEntries.length === 0) {
 							ctx.ui.notify(`No checkpoints found for ${ref}.`, "warning");
@@ -521,7 +522,7 @@ export default function (pi: ExtensionAPI) {
 						if (uniqueFiles.length <= 2) {
 							const diffParts: string[] = [];
 							for (const file of uniqueFiles) {
-								const diff = await previewDiff(manager, ref, 3000);
+								const diff = await previewDiff(mgr, ref, 3000);
 								if (diff && diff !== "(no diff content)") {
 									diffParts.push(`--- ${file} ---\n${diff}`);
 								}
@@ -543,7 +544,7 @@ export default function (pi: ExtensionAPI) {
 							const absolutePath = resolve(ctx.cwd, file);
 							try {
 								await withFileMutationQueue(absolutePath, async () => {
-									const success = await manager.restoreFile(ref, file);
+									const success = await mgr.restoreFile(ref, file);
 									if (success) restored.push(file);
 									else failed.push(file);
 								});
@@ -573,7 +574,7 @@ export default function (pi: ExtensionAPI) {
 					const absolutePath = resolve(ctx.cwd, filePath);
 					try {
 						await withFileMutationQueue(absolutePath, async () => {
-							const success = await manager.restoreFile(ref, filePath);
+							const success = await mgr.restoreFile(ref, filePath);
 							ctx.ui.notify(success ? `Restored ${filePath} to ${ref}` : `Failed to restore ${filePath}`, success ? "info" : "error");
 						});
 					} catch (err) {
@@ -612,48 +613,49 @@ export default function (pi: ExtensionAPI) {
 		}, { additionalProperties: false }),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (!manager) {
-				return { content: [{ type: "text", text: "Error: no active checkpoint session" }] };
+				return { content: [{ type: "text", text: "Error: no active checkpoint session" }], details: undefined };
 			}
+			const mgr = manager;
 
-			await manager.init();
+			await mgr.init();
 			const action = params.action?.toLowerCase();
 
 			switch (action) {
 				case "list": {
-					const { turns, entries } = manager.listCheckpoints();
+					const { turns, entries } = mgr.listCheckpoints();
 					if (entries.length === 0 && turns.length === 0) {
-						return { content: [{ type: "text", text: "No checkpoints yet. Checkpoints are created automatically before each file edit." }] };
+						return { content: [{ type: "text", text: "No checkpoints yet. Checkpoints are created automatically before each file edit." }], details: undefined };
 					}
 					let turnPromptMap = new Map<number, string>();
 					try {
 						turnPromptMap = buildTurnPromptMap(ctx.sessionManager.getEntries());
 					} catch { /* ok */ }
 					const listing = buildAgentListing(turns, entries, turnPromptMap);
-					return { content: [{ type: "text", text: listing || "No checkpoints" }] };
+					return { content: [{ type: "text", text: listing || "No checkpoints" }], details: undefined };
 				}
 
 				case "diff": {
 					if (!params.ref) {
-						return { content: [{ type: "text", text: "Error: 'ref' is required for diff action. Usage: checkpoint diff <sha|tag>" }] };
+						return { content: [{ type: "text", text: "Error: 'ref' is required for diff action. Usage: checkpoint diff <sha|tag>" }], details: undefined };
 					}
 					try {
 						const parts = params.ref.trim().split(/\s+/);
 						const diff = parts.length > 1
-							? await manager.getDiffRange(parts[0], parts[1])
-							: await manager.getDiff(params.ref);
+							? await mgr.getDiffRange(parts[0], parts[1])
+							: await mgr.getDiff(params.ref);
 						if (!diff.trim()) {
-							return { content: [{ type: "text", text: "No changes at this checkpoint." }] };
+							return { content: [{ type: "text", text: "No changes at this checkpoint." }], details: undefined };
 						}
 						const truncated = diff.length > 8000 ? diff.slice(0, 8000) + `\n... (${diff.length} chars total)` : diff;
-						return { content: [{ type: "text", text: truncated }] };
+						return { content: [{ type: "text", text: truncated }], details: undefined };
 					} catch (err) {
-						return { content: [{ type: "text", text: `Diff failed: ${err}` }] };
+						return { content: [{ type: "text", text: `Diff failed: ${err}` }], details: undefined };
 					}
 				}
 
 				case "restore": {
 					if (!params.ref) {
-						return { content: [{ type: "text", text: "Error: 'ref' is required for restore action. Usage: checkpoint restore <sha|tag> [file]" }] };
+						return { content: [{ type: "text", text: "Error: 'ref' is required for restore action. Usage: checkpoint restore <sha|tag> [file]" }], details: undefined };
 					}
 					const { ref } = params;
 
@@ -661,12 +663,12 @@ export default function (pi: ExtensionAPI) {
 					if (!params.file && ref.startsWith("turn-")) {
 						const turnNum = parseInt(ref.slice(5), 10);
 						if (isNaN(turnNum)) {
-							return { content: [{ type: "text", text: `Error: Invalid turn tag '${ref}'. Expected format: turn-N` }] };
+							return { content: [{ type: "text", text: `Error: Invalid turn tag '${ref}'. Expected format: turn-N` }], details: undefined };
 						}
-						const { entries } = manager.listCheckpoints();
+						const { entries } = mgr.listCheckpoints();
 						const turnEntries = entries.filter((e) => (e.turn ?? 0) === turnNum);
 						if (turnEntries.length === 0) {
-							return { content: [{ type: "text", text: `No checkpoints found for ${ref}.` }] };
+							return { content: [{ type: "text", text: `No checkpoints found for ${ref}.` }], details: undefined };
 						}
 						const uniqueFiles = [...new Set(turnEntries.map((e) => e.file))];
 
@@ -675,7 +677,7 @@ export default function (pi: ExtensionAPI) {
 						if (uniqueFiles.length <= 2) {
 							const diffParts: string[] = [];
 							for (const file of uniqueFiles) {
-								const diff = await previewDiff(manager, ref, 3000);
+								const diff = await previewDiff(mgr, ref, 3000);
 								if (diff && diff !== "(no diff content)") {
 									diffParts.push(`--- ${file} ---\n${diff}`);
 								}
@@ -689,7 +691,7 @@ export default function (pi: ExtensionAPI) {
 						if (ctx.hasUI) {
 							const confirmed = await ctx.ui.confirm("Restore turn?", confirmMsg);
 							if (!confirmed) {
-								return { content: [{ type: "text", text: "Restore cancelled by user." }] };
+								return { content: [{ type: "text", text: "Restore cancelled by user." }], details: undefined };
 							}
 						}
 
@@ -699,7 +701,7 @@ export default function (pi: ExtensionAPI) {
 							const absolutePath = resolve(ctx.cwd, file);
 							try {
 								await withFileMutationQueue(absolutePath, async () => {
-									const success = await manager.restoreFile(ref, file);
+									const success = await mgr.restoreFile(ref, file);
 									if (success) restored.push(file);
 									else failed.push(file);
 								});
@@ -711,17 +713,17 @@ export default function (pi: ExtensionAPI) {
 						const result = restored.length > 0
 							? `Restored ${restored.length} ${restored.length === 1 ? "file" : "files"} to ${ref}${failed.length > 0 ? ` (${failed.length} failed: ${failed.join(", ")})` : ""}`
 							: `Failed to restore files from ${ref}`;
-						return { content: [{ type: "text", text: result }] };
+						return { content: [{ type: "text", text: result }], details: undefined };
 					}
 
 					// Single file restore
 					if (!params.file) {
-						return { content: [{ type: "text", text: "Error: 'file' is required when restoring by SHA. Usage: checkpoint restore <sha> <file>  (omit file only for turn tags like 'turn-3')" }] };
+						return { content: [{ type: "text", text: "Error: 'file' is required when restoring by SHA. Usage: checkpoint restore <sha> <file>  (omit file only for turn tags like 'turn-3')" }], details: undefined };
 					}
 					const { file } = params;
 
 					// Show diff preview in the confirmation dialog
-					const diff = await previewDiff(manager, ref, 2000);
+					const diff = await previewDiff(mgr, ref, 2000);
 					const preview = diff.length > 2000 ? diff.slice(0, 2000) + "..." : diff;
 
 					// Require user confirmation with diff context
@@ -731,25 +733,25 @@ export default function (pi: ExtensionAPI) {
 							`Restore ${file} to state at ${ref}?\n\nChanges that will be applied:\n${preview}`,
 						);
 						if (!confirmed) {
-							return { content: [{ type: "text", text: "Restore cancelled by user." }] };
+							return { content: [{ type: "text", text: "Restore cancelled by user." }], details: undefined };
 						}
 					}
 					const absolutePath = resolve(ctx.cwd, file);
 					return withFileMutationQueue(absolutePath, async () => {
 						try {
-							const success = await manager.restoreFile(ref, file);
+							const success = await mgr.restoreFile(ref, file);
 							if (success) {
-								return { content: [{ type: "text", text: `Restored ${file} to ${ref}` }] };
+								return { content: [{ type: "text", text: `Restored ${file} to ${ref}` }], details: undefined };
 							}
-							return { content: [{ type: "text", text: `Failed to restore ${file}. The ref or file may not exist in the checkpoint history.` }] };
+							return { content: [{ type: "text", text: `Failed to restore ${file}. The ref or file may not exist in the checkpoint history.` }], details: undefined };
 						} catch (err) {
-							return { content: [{ type: "text", text: `Restore failed: ${err}` }] };
+							return { content: [{ type: "text", text: `Restore failed: ${err}` }], details: undefined };
 						}
 					});
 				}
 
 				default:
-					return { content: [{ type: "text", text: `Unknown action '${action}'. Use: list, diff, restore` }] };
+					return { content: [{ type: "text", text: `Unknown action '${action}'. Use: list, diff, restore` }], details: undefined };
 			}
 		},
 	});

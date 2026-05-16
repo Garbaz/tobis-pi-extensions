@@ -3,9 +3,9 @@
 
 import type { TelegramApi } from "./api.js";
 import type { Update } from "./types.js";
-import { error } from "./log.js";
+import { warn } from "./log.js";
 
-/** Update types we subscribe to. Keep minimal — reduces traffic. */
+/** Update types we subscribe to. Keep minimal - reduces traffic. */
 const ALLOWED_UPDATES = ["message", "edited_message", "callback_query", "my_chat_member"] as const;
 
 /** Long-poll timeout in seconds. Must be positive; 0 = short polling (test only). */
@@ -88,23 +88,33 @@ export class TelegramPolling {
 					try {
 						await this.callbacks.onUpdate(update);
 					} catch (err) {
-						// Log but don't crash the loop — individual update handlers
+						// Log but don't crash the loop - individual update handlers
 						// should not break polling
-						error(`[telegram] Error handling update ${update.update_id}:`, err);
+						warn(`Error handling update ${update.update_id}: ${err instanceof Error ? err.message : String(err)}`);
 					}
 				}
 			} catch (err) {
-				if (!this.running) break; // Aborted — expected
+				if (!this.running) break; // Aborted - expected
 
 				if (err instanceof DOMException && err.name === "AbortError") break;
 
 				const message = err instanceof Error ? err.message : String(err);
-				error(`[telegram] Polling error: ${message}`);
+				warn(`Polling error: ${message}`);
 
 				// Unrecoverable errors
 				if (message.includes("401") || message.includes("Unauthorized")) {
 					this.callbacks.onError(err instanceof Error ? err : new Error(message));
 					break;
+				}
+
+				// 409 Conflict = another instance is polling the same token.
+				// This happens during relay failover or when two processes start
+				// simultaneously. Back off longer and retry - one of them will
+				// eventually win (the other will start getting 409s and give up).
+				if (message.includes("409") || message.includes("Conflict")) {
+					await sleep(10000);
+					if (!this.running) break;
+					continue;
 				}
 
 				// Backoff on transient errors before retrying

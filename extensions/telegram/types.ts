@@ -1,5 +1,5 @@
 // ── Telegram Bot API Types ───────────────────────────────────────────────────
-// Minimal typed subset of the Telegram Bot API (10.0) — only what we need.
+// Minimal typed subset of the Telegram Bot API (10.0) - only what we need.
 
 // ── Primitives ───────────────────────────────────────────────────────────────
 
@@ -87,6 +87,7 @@ export interface Sticker {
 	is_video: boolean;
 	emoji?: string;
 	set_name?: string;
+	custom_emoji_id?: string;
 	file_size?: number;
 }
 
@@ -215,7 +216,7 @@ export interface Message {
 	entities?: MessageEntity[];
 	/** Link preview options */
 	link_preview_options?: LinkPreviewOptions;
-	/** Media fields — at most one is set */
+	/** Media fields - at most one is set */
 	photo?: PhotoSize[];
 	document?: Document;
 	voice?: Voice;
@@ -410,6 +411,11 @@ export type MediaType = "voice" | "audio" | "photo" | "sticker" | "video" | "vid
 export interface TelegramConfig {
 	botToken?: string;
 	allowedUserId?: number;
+	/** User IDs pre-approved to use this bot. If set, only whitelisted users are auto-accepted.
+	 *  Users not on this list trigger a confirmation prompt in the Pi TUI. */
+	whitelist?: number[];
+	/** User IDs blocked from using this bot. Blacklisted users are silently ignored. */
+	blacklist?: number[];
 	/** Whether to use forum topics for per-session routing.
 	 *  When true (default), creates a topic per Pi session if the bot supports it.
 	 *  Set to false to disable topics even if the bot supports them. */
