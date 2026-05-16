@@ -89,7 +89,12 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 				{
 					const sess = currentSession();
 					if (sess && isTelegramConnected()) {
-						await setupSessionTopic(ctx);
+						const result = await setupSessionTopic(ctx);
+						if (result.action === "created" && result.topicName) {
+							ctx.ui.notify(`Telegram: topic "${result.topicName}"`, "info");
+						} else if (result.action === "resumed" && result.topicName) {
+							ctx.ui.notify(`Telegram: resumed topic "${result.topicName}"`, "info");
+						}
 					}
 				}
 				break;
@@ -361,7 +366,12 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 
 		// Set up forum topic for this session (if connected and paired)
 		if (isTelegramConnected() && state.config.allowedUserId) {
-			await setupSessionTopic(ctx, reason);
+			const result = await setupSessionTopic(ctx, reason);
+			if (result.action === "created" && result.topicName) {
+				ctx.ui.notify(`Telegram: topic "${result.topicName}"`, "info");
+			} else if (result.action === "resumed" && result.topicName) {
+				ctx.ui.notify(`Telegram: resumed topic "${result.topicName}"`, "info");
+			}
 		}
 	});
 

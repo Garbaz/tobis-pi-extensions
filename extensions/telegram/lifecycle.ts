@@ -76,7 +76,12 @@ export async function connect(ctx: ExtensionCommandContext | ExtensionContext): 
 			// Set up topic for the current session after pairing
 			const sessCtx = safeCtx(currentSession()?.ctx);
 			if (sessCtx) {
-				await setupSessionTopic(sessCtx);
+				const result = await setupSessionTopic(sessCtx);
+				if (result.action === "created" && result.topicName) {
+					notify(`Telegram: topic "${result.topicName}"`, "info");
+				} else if (result.action === "resumed" && result.topicName) {
+					notify(`Telegram: resumed topic "${result.topicName}"`, "info");
+				}
 			}
 		},
 		onChatLock: () => {

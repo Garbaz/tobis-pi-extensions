@@ -223,7 +223,10 @@ export class TopicManager {
 			}, signal);
 			session.name = topicName;
 		} catch (err) {
-			if (isNotSupergroupForum(err)) return; // expected in non-forum chats
+			if (isNotSupergroupForum(err)) {
+				notifyWarn(`editForumTopic returned "not a supergroup forum" - private chat topics may not support rename`);
+				return;
+			}
 			const msg = err instanceof Error ? err.message : String(err);
 			notifyWarn(`Failed to rename forum topic to "${topicName}": ${msg}`);
 		}

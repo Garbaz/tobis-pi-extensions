@@ -51,11 +51,19 @@ export type SessionStartReason = "startup" | "reload" | "new" | "resume" | "fork
  *  - First incoming message renames the topic to "basename · snippet".
  *  - Writes session data so the session auto-connects on resume.
  *  - Subscribes to the thread via relay client if applicable. */
-export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionStartReason): Promise<void> {
+/** Result of setting up a session topic. */
+export interface TopicSetupResult {
+	/** What happened during setup: "created", "resumed", or "skipped". */
+	action: "created" | "resumed" | "skipped";
+	/** The topic name (label) used. */
+	topicName?: string;
+}
+
+export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionStartReason): Promise<TopicSetupResult> {
 	const sess = currentSession();
 	const bridge = state.bridge;
 	const tm = bridge?.getTopicManager();
-	if (!sess || !bridge || !tm || !state.config.allowedUserId) return;
+	if (!sess || !bridge || !tm || !state.config.allowedUserId) return { action: "skipped" };
 
 	const label = cwdBasename();
 
@@ -76,20 +84,25 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 			if (sessionData.topicName && sessionData.topicName.includes("\u00B7")) {
 				sess.topicRenamed = true;
 			}
-			ctx.ui.notify(`Telegram: resumed topic "${sessionData.topicName ?? label}"`, "info");
+			return { action: "resumed", topicName: sessionData.topicName ?? label };
 		}
 	} else if (state.topicsEnabled) {
 		// Create the topic immediately so it's ready for messages.
 		const iconColor = TOPIC_ICON_COLORS[Math.floor(Math.random() * TOPIC_ICON_COLORS.length)];
 		const threadId = await bridge.registerSession(sess.sessionId, label, undefined, iconColor);
+		let created = false;
 		if (threadId !== undefined) {
 			bridge.activateSession(sess.sessionId);
 			activateSession(sess.sessionId);
 			await saveSessionFields(sess.sessionDir, { connected: true, threadId, topicName: label });
-			ctx.ui.notify(`Telegram: created topic "${label}"`, "info");
+			created = true;
 		}
 		// Hide the General topic - it's confusing when sessions have dedicated topics
 		await tm.hideGeneralTopic();
+
+		if (created) {
+			return { action: "created", topicName: label };
+		}
 	}
 
 	// Mark this session as telegram-connected.
@@ -104,6 +117,8 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 	if (sessionDataAfter?.threadId && state.relayClient?.isConnected()) {
 		state.relayClient.subscribe(sessionDataAfter.threadId, sess.sessionId);
 	}
+
+	return { action: "skipped" };
 }
 
 /** Ensure the forum topic for the current session exists.
