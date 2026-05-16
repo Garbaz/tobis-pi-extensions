@@ -315,7 +315,6 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 	});
 
 	// Echo TUI-originated user messages to Telegram
-	// + Capture first message for topic renaming (works for both TUI and Telegram input)
 	extensionApi.on("input", (event: InputEvent, ctx: ExtensionContext) => {
 		instance.notifier.bind(ctx);
 		const sessionId = getSessionId(ctx);
@@ -325,10 +324,6 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		instance.lastActiveSessionId = sessionId;
 
 		const session = instance.sessions.get(sessionId);
-		if (session) {
-			// Capture first message for topic renaming
-			void session.captureFirstMessage(event.text).catch(() => {});
-		}
 
 		// Echo TUI messages to Telegram
 		if (event.source === "interactive" && instance.pairedChatId) {

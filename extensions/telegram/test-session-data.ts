@@ -19,15 +19,11 @@
 //       reconnecting can resume the same topic. An overwrite-based approach
 //       would lose this data on disconnect.
 //
-//   D5: topicRenamed persists across sessions: setting it in session data,
-//       reading after fresh load returns true. (Cites "Topic Lifecycle" from
-//       ARCHITECTURE.md — the rename is one-shot, gated by topicRenamed: true
-//       in session data, so it must survive reload/resume.)
+//   D5: topicRenamed is tolerated on read for backward compat but no longer
+//       written. Old session files with this field still load correctly.
 //
-//   D6: firstMessageSnippet captured before topic exists is preserved so it
-//       can be applied when the topic is created later. (Cites "Topic
-//       Lifecycle" — firstMessageSnippet is captured by input event and
-//       applied when both snippet and thread exist.)
+//   D6: firstMessageSnippet is tolerated on read for backward compat but no
+//       longer written. Old session files with this field still load correctly.
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -100,22 +96,29 @@ describe("saveSessionFields", () => {
 		assert.equal(data, undefined);
 	});
 
-	// D5: topicRenamed persists across sessions.
-	it("topicRenamed field persists after write and read", async () => {
+	// D5: topicRenamed is tolerated on read for backward compat.
+	it("topicRenamed field is read from old files for backward compat", async () => {
 		const sessionFile = join(testDir, "2026-05-15_abc123.jsonl");
-		await saveSessionFields(sessionFile, { connected: true, threadId: 42, topicRenamed: true });
+		// Write a file with the deprecated field (simulating pre-refactor data)
+		const { writeFile, mkdir: mkdirAsync } = await import("node:fs/promises");
+		const filePath = sessionDataPath(sessionFile)!;
+		await mkdirAsync(join(filePath, ".."), { recursive: true });
+		await writeFile(filePath, JSON.stringify({ connected: true, threadId: 42, topicRenamed: true }), "utf-8");
 		const data = await readSessionData(sessionFile);
 		assert.ok(data);
-		assert.equal(data.topicRenamed, true, "topicRenamed must persist");
+		assert.equal(data.topicRenamed, true, "topicRenamed read from old file");
 	});
 
-	// D6: firstMessageSnippet captured before topic exists is preserved.
-	it("firstMessageSnippet is preserved when saved before topic exists", async () => {
+	// D6: firstMessageSnippet is tolerated on read for backward compat.
+	it("firstMessageSnippet is read from old files for backward compat", async () => {
 		const sessionFile = join(testDir, "2026-05-15_abc123.jsonl");
-		await saveSessionFields(sessionFile, { firstMessageSnippet: "fix the login bug" });
+		const { writeFile, mkdir: mkdirAsync } = await import("node:fs/promises");
+		const filePath = sessionDataPath(sessionFile)!;
+		await mkdirAsync(join(filePath, ".."), { recursive: true });
+		await writeFile(filePath, JSON.stringify({ connected: true, firstMessageSnippet: "fix the login bug" }), "utf-8");
 		const data = await readSessionData(sessionFile);
 		assert.ok(data);
-		assert.equal(data.firstMessageSnippet, "fix the login bug", "firstMessageSnippet must persist");
+		assert.equal(data.firstMessageSnippet, "fix the login bug", "firstMessageSnippet read from old file");
 	});
 
 	// Backwards compatibility: reading files without topicRenamed/firstMessageSnippet works.

@@ -10,7 +10,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Instance } from "./instance.js";
 import { OutgoingHandler } from "./outgoing.js";
 import { readSessionData, saveSessionFields } from "./session-data.js";
-import { createForumTopic, reopenForumTopic, closeForumTopic, renameForumTopic, hideGeneralTopic } from "./topic-api.js";
+import { createForumTopic, reopenForumTopic, closeForumTopic, hideGeneralTopic } from "./topic-api.js";
 import { createLogger, runWithContext, withContext } from "./log.js";
 const log = createLogger("session");
 
@@ -43,10 +43,6 @@ export class Session {
 	/** Forum topic name. Set when topic is created or renamed. */
 	topicName: string | undefined;
 
-	/** Whether the topic has been renamed from CWD basename to "basename · snippet".
-	 *  Kept in sync with session data's topicRenamed field. */
-	topicRenamed: boolean = false;
-
 	/** Per-session outgoing message handler. Set during topic setup. */
 	outgoing: OutgoingHandler | undefined;
 
@@ -65,8 +61,7 @@ export class Session {
 	 *  Called from session_start and /telegram connect.
 	 *
 	 *  - On "resume" or "reload": resumes the existing topic from session data.
-	 *  - On "new", "startup", or "fork": creates a fresh topic with CWD basename.
-	 *  - First incoming message renames the topic to "basename · snippet".
+	 *  - On "new", "startup", or "fork": creates a fresh topic with timestamp-based name.
 	 *  - Writes session data so the session auto-connects on resume.
 	 *  - Subscribes to the thread via relay. */
 	async setupTopic(ctx: ExtensionContext, reason?: SessionStartReason): Promise<TopicSetupResult> {
@@ -78,8 +73,8 @@ export class Session {
 
 		if (!api || !chatId || !config.allowedUserId) return { action: "skipped" };
 
-		const label = cwdBasename();
-		log.debug({ label, topicsEnabled: this.instance.topicsEnabled, topicRenamed: this.topicRenamed }, "setupTopic: proceed");
+		const label = topicNameFromTimestamp(this.sessionFile);
+		log.debug({ label, topicsEnabled: this.instance.topicsEnabled }, "setupTopic: proceed");
 
 		// Only resume existing topic on resume/reload — never on new/startup/fork
 		const canResume = reason === "resume" || reason === "reload";
@@ -94,10 +89,6 @@ export class Session {
 				// restoreTopic set this.threadId via setSessionThread — update ALS
 				return runWithContext(withContext({ threadId: this.threadId! }), () => {
 					log.debug("setupTopic: restored");
-					if (sessionData.topicRenamed) {
-						this.topicRenamed = true;
-						log.debug("setupTopic: already renamed");
-					}
 					return { action: "resumed" as const, topicName: sessionData.topicName ?? label };
 				});
 			}
@@ -131,55 +122,6 @@ export class Session {
 		}
 
 		return { action: "skipped" };
-	}
-
-	/** Capture the first user message text for topic renaming.
-	 *  Writes firstMessageSnippet into session data if not already set.
-	 *  If topic exists and not yet renamed, applies the rename. */
-	async captureFirstMessage(text: string): Promise<void> {
-		// Skip commands
-		const firstLine = text.split("\n")[0]?.trim() || "";
-		if (firstLine.startsWith("/")) return;
-
-		const snippet = firstLine.slice(0, 60).trim();
-		if (!snippet) return;
-
-		// Save snippet to session data if not already set
-		const sessionData = await readSessionData(this.sessionFile);
-		if (!sessionData?.firstMessageSnippet) {
-			await saveSessionFields(this.sessionFile, { firstMessageSnippet: snippet });
-		}
-
-		// Apply rename if topic exists and not yet renamed
-		if (this.threadId !== undefined && !this.topicRenamed) {
-			await this.applyTopicRename();
-		}
-	}
-
-	/** Apply the topic rename from session data's firstMessageSnippet.
-	 *  Called when both the snippet and the thread are available. */
-	async applyTopicRename(): Promise<void> {
-		if (this.topicRenamed) return;
-
-		const api = this.instance.api;
-		const chatId = this.instance.pairedChatId;
-		if (!api || !chatId || this.threadId === undefined) return;
-
-		const sessionData = await readSessionData(this.sessionFile);
-		const snippet = sessionData?.firstMessageSnippet;
-		if (!snippet) return;
-
-		const name = topicNameFromMessage(snippet);
-		log.debug({ name }, "applyTopicRename");
-
-		this.topicRenamed = true;
-		await saveSessionFields(this.sessionFile, { topicRenamed: true });
-
-		await renameForumTopic(api, chatId, this.threadId, name);
-
-		this.topicName = name;
-		await saveSessionFields(this.sessionFile, { topicName: name });
-		log.debug({ topicName: name }, "applyTopicRename: done");
 	}
 
 	/** Tear down this session's Telegram state.
@@ -285,11 +227,23 @@ function cwdBasename(): string {
 	return cwd.split("/").pop() || "session";
 }
 
-function topicNameFromMessage(text: string): string {
+/** Extract a human-readable timestamp from the session file name.
+ *  Session files are named: <timestamp>_<sessionId>.jsonl
+ *  where timestamp is ISO 8601 like 2026-05-16T23-02-21-906Z.
+ *  Returns the CWD basename + " · " + formatted local time (e.g. "workspace · 2026-05-16 23:02").
+ *  Falls back to CWD basename alone if the filename doesn't match. */
+function topicNameFromTimestamp(sessionFile: string | undefined): string {
 	const basename = cwdBasename();
-	const firstLine = text.split("\n")[0]?.trim() || "";
-	const snippet = firstLine.replace(/^\/\S+\s*/, "").slice(0, 60).trim();
-	if (!snippet) return basename;
-	const name = `${basename} \u00B7 ${snippet}`;
+	if (!sessionFile) return basename;
+
+	// Extract the filename (last path component) and strip .jsonl
+	const fileName = sessionFile.split("/").pop() ?? "";
+	// Match ISO timestamp prefix: 2026-05-16T23-02-21-906Z_...
+	const match = fileName.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})/);
+	if (!match) return basename;
+
+	const [, year, month, day, hour, minute] = match;
+	const timestamp = `${year}-${month}-${day} ${hour}:${minute}`;
+	const name = `${basename} \u00B7 ${timestamp}`;
 	return name.slice(0, 128);
 }

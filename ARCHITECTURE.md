@@ -163,8 +163,8 @@ Companion schema:
 | `connected: boolean` | Auto-connect sentinel (see "Connected Sentinel"). |
 | `threadId: number` | Forum topic thread id (kept across disconnects). |
 | `topicName: string` | Topic name (kept across disconnects). |
-| `topicRenamed: boolean` | Whether the topic has been renamed from CWD basename to `basename · snippet`. Persisted so it survives reload/resume. |
-| `firstMessageSnippet: string` | First user-message text captured by `input` event, used to rename the topic once a thread exists. |
+| `topicRenamed: boolean` | @deprecated Tolerated on read for backward compat. No longer written. |
+| `firstMessageSnippet: string` | @deprecated Tolerated on read for backward compat. No longer written. |
 
 ### Config vs Runtime State
 
@@ -178,9 +178,9 @@ Session data uses an explicit `connected: boolean` field, not file-existence. Au
 
 Topics are created eagerly on connect, not lazily on first message. Lazy topic creation was a bug magnet (outgoing handler could receive messages before the thread id was known).
 
-The topic name starts as the CWD basename. On the first user message — from either TUI or Telegram, via the Pi `input` event — the topic is renamed to `basename · snippet`. The first-message text is captured into `firstMessageSnippet` in session data immediately on the `input` event; the rename is applied as soon as both `firstMessageSnippet` is set and the thread exists. This handles the case where the first input arrives before `/telegram connect`.
+The topic name is derived from the session file timestamp: `basename · YYYY-MM-DD HH:MM`, where `basename` is the CWD directory name and the timestamp comes from the session file name (e.g. `2026-05-16T23-02-21-906Z_...jsonl` → `2026-05-16 23:02`). This gives a stable, predictable topic name without relying on the first message content (which could be long or a command). If the session file name has no timestamp prefix, the topic name falls back to the CWD basename alone.
 
-The rename is one-shot, gated by `topicRenamed: true` in session data. The flag is persisted so a subsequent `/resume` does not re-rename. The previous heuristic (look for a middle dot in the topic name) is removed.
+The name is set at topic creation time and never renamed later. On resume, the previously saved `topicName` is restored from session data.
 
 ### General Topic Routing
 

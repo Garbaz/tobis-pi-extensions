@@ -23,11 +23,9 @@ export interface TelegramSessionData {
 	threadId?: number;
 	/** Forum topic name. */
 	topicName?: string;
-	/** Whether the topic has been renamed from CWD basename to "basename · snippet".
-	 *  Persisted so it survives reload/resume. */
+	/** @deprecated No longer written. Tolerated on read for backward compat. */
 	topicRenamed?: boolean;
-	/** First user-message text, captured by input event.
-	 *  Used to rename the topic once a thread exists. */
+	/** @deprecated No longer written. Tolerated on read for backward compat. */
 	firstMessageSnippet?: string;
 }
 
