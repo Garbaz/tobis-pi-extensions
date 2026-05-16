@@ -42,7 +42,7 @@ function shortenBashCommand(cmd: string, maxLen: number): string {
 }
 
 /** Truncate a tool input into a short summary for the turn buffer. */
-function summarizeToolInput(toolName: string, args: Record<string, unknown>): string {
+export function summarizeToolInput(toolName: string, args: Record<string, unknown>): string {
 	switch (toolName) {
 		case "bash": {
 			const cmd = String(args.command ?? "");
@@ -87,7 +87,7 @@ function stripToolHtml(block: string): string {
 	return text;
 }
 
-function truncate(s: string, maxLen: number): string {
+export function truncate(s: string, maxLen: number): string {
 	if (s.length <= maxLen) return s;
 	return s.slice(0, maxLen - 1) + "\u{2026}";
 }
@@ -116,7 +116,7 @@ const ELLIPSIS = "\u{2026}";
  *   → ~/…/file.js
  *   → …/file.js
  */
-function shortenPath(path: string, maxLen: number): string {
+export function shortenPath(path: string, maxLen: number): string {
 	if (path.length <= maxLen) return path;
 
 	const normalized = path.replace(/\\/g, "/");

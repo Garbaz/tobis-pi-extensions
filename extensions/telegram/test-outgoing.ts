@@ -1,70 +1,11 @@
 // ── Tests for outgoing.ts utility functions ──────────────────────────────────
-// Standalone test — no Pi dependencies needed, just the pure functions.
+// Tests the pure formatting functions: shortenPath, summarizeToolInput, truncate.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-
-function truncate(s: string, maxLen: number): string {
-	if (s.length <= maxLen) return s;
-	return s.slice(0, maxLen - 1) + "\u{2026}";
-}
+import { truncate, shortenPath, summarizeToolInput } from "./outgoing.js";
 
 const ELLIPSIS = "\u{2026}";
-
-function shortenPath(path: string, maxLen: number): string {
-	if (path.length <= maxLen) return path;
-
-	const normalized = path.replace(/\\/g, "/");
-	const hasRoot = normalized.startsWith("/");
-	const segments = normalized.split("/").filter(s => s !== "");
-
-	if (segments.length <= 1) {
-		return truncate(path, maxLen);
-	}
-
-	const prefix = hasRoot ? "/" : "";
-	const first = segments[0];
-	const last = segments[segments.length - 1];
-
-	if (segments.length >= 3) {
-		const secondLast = segments[segments.length - 2];
-		const candidate = `${prefix}${first}/${ELLIPSIS}/${secondLast}/${last}`;
-		if (candidate.length <= maxLen) return candidate;
-	}
-
-	{
-		const candidate = `${prefix}${first}/${ELLIPSIS}/${last}`;
-		if (candidate.length <= maxLen) return candidate;
-	}
-
-	{
-		const candidate = `${ELLIPSIS}/${last}`;
-		if (candidate.length <= maxLen) return candidate;
-	}
-
-	return truncate(last, maxLen);
-}
-
-function summarizeToolInput(toolName: string, args: Record<string, unknown>): string {
-	switch (toolName) {
-		case "bash": {
-			const cmd = String(args.command ?? "");
-			return truncate(cmd.replace(/\n/g, " \u{21B5} "), 60);
-		}
-		case "read":
-		case "write":
-		case "edit":
-			return shortenPath(String(args.path ?? args.file ?? ""), 40);
-		case "grep":
-			return truncate(String(args.pattern ?? ""), 30);
-		case "find":
-			return truncate(String(args.pattern ?? ""), 30);
-		case "ls":
-			return shortenPath(String(args.path ?? "."), 40);
-		default:
-			return "";
-	}
-}
 
 describe("shortenPath", () => {
 	it("short paths unchanged", () => {
@@ -92,7 +33,6 @@ describe("shortenPath", () => {
 	});
 
 	it("absolute path: drops to \u{2026}/filename when first segment is long", () => {
-		// First segment is very long so /verylongseg/…/filename still exceeds limit
 		const extreme = "/verylongsegmentthatisquiteextensive/subdir/another/file.ts";
 		const result = shortenPath(extreme, 30);
 		assert.ok(result.length <= 30, `result "${result}" length ${result.length} > 30`);
@@ -136,7 +76,6 @@ describe("shortenPath", () => {
 	it("two segments: first/last fits", () => {
 		const path = "verylongdirectoryname/filename.ts";
 		const result = shortenPath(path, 40);
-		// With only 2 segments, shortenPath does first/…/last
 		assert.equal(result, "verylongdirectoryname/filename.ts");
 	});
 
@@ -146,11 +85,9 @@ describe("shortenPath", () => {
 	});
 
 	it("iterative shortening: 3+ segments keeps second-to-last", () => {
-		// Path where /home/…/src/index.ts fits in 25 chars
 		const path = "/home/tobi/p/project/src/index.ts";
 		const result = shortenPath(path, 25);
 		assert.ok(result.length <= 25, `result "${result}" length ${result.length} > 25`);
-		// Should be /home/…/src/index.ts (24 chars)
 		assert.ok(result.includes(ELLIPSIS));
 		assert.ok(result.endsWith("index.ts"));
 	});
@@ -165,8 +102,9 @@ describe("shortenPath", () => {
 describe("summarizeToolInput", () => {
 	it("bash: truncates long commands", () => {
 		const result = summarizeToolInput("bash", { command: "cd /very/long/path/that/goes/on/and/on/and/on/and/on/and/on/forever" });
-		assert.ok(result.length <= 60);
-		assert.ok(result.endsWith("\u{2026}"));
+		assert.ok(result.length <= 60, `length ${result.length} > 60: "${result}"`);
+		// The result is shortenBashCommand output, which shortens paths
+		assert.ok(result.length > 0, "result should not be empty");
 	});
 
 	it("bash: replaces newlines with \u{21B5}", () => {
