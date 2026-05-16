@@ -31,6 +31,40 @@ Per the new architecture, `/status` from Telegram is contextual:
 
 `/telegram status` from the TUI continues to show Instance info. This is already implemented in the refactor — `handleStatusCommand` in `incoming.ts` dispatches to `Session.statusInfo()` or `Instance.statusInfo()` based on whether the message is in a session topic or General topic.
 
+### Staging area / "for later" queue
+
+The user constantly has ideas while the agent is busy with something else. Need a way to note down ideas in Telegram without interrupting the current agent turn — not queuing them as the next message, but parking them for later review. Could be a Telegram extension feature (e.g. `/later <text>` or a dedicated staging topic) or a more general pi-level solution. Open question: is this a Telegram problem or a pi problem?
+
+### Queue with background pre-processing
+
+When messages are queued in the Telegram extension (because the agent is busy), media processing (transcription, image handling, etc.) should happen in the background *while still queued*, so results are ready the moment the agent turn starts. Use pi's internal queuing system if possible — don't build a custom queue on top. Media processing must be strictly sequential (one item at a time) since processor scripts/APIs may not handle concurrency safely.
+
+### Pi status bar integration + message cleanup
+
+Use the extension API's status bar function to show: connection status, bot name, queue depth. This gives visibility when processing takes time (e.g. 30s with no feedback). Also audit all status/chat messages for redundancy and flicker — the connect sequence currently sends a checkmark then immediately overwrites with the "connected" message. Keep the `/telegram connect` response, but remove unnecessary notifications (e.g. "new thread created" is internal detail, not user-facing). Each visible message should have a clear purpose and not collide with another.
+
+### Reply-based steering vs follow-up semantics
+
+Use Telegram's reply feature to distinguish message intent:
+1. **No reply** (regular message) → follow-up, queued after the current turn (like Alt+Enter in pi)
+2. **Reply to the current/last agent message** → steering message, injected into the running turn (like Enter in pi)
+3. **Reply to an older message** → follow-up with the quoted message included as context (markdown quote block above the user's text)
+
+Needs investigation of what pi's extension API currently supports for the steering vs follow-up distinction.
+
+### AGENTS.md: mandate updating docs after changes
+
+The agent should proactively update ARCHITECTURE.md, README.md, knowledge base files, and other tracked docs to reflect changes made, decisions arrived at, and user preferences expressed. Ensure this is explicitly stated in AGENTS.md if not already.
+
+### Notification control — only notify on turn completion
+
+The old Telegram extension sends dozens of notifications per turn. We already improved this by sending one message per turn with edits, but edits don't trigger Telegram notifications. Goal: only notify the user when the agent's turn is complete. Options to investigate:
+1. **Best:** Send the initial message silently (possible via API), edits don't notify (default), and find a way to make the final edit trigger a notification (needs API research/testing)
+2. **Alt A:** If edits never notify, send a short "turn complete" dummy message at the end (notification won't contain actual content)
+3. **Alt B:** Once the turn is complete, send the full message as a new (notifying) message first, then delete the old one — new-first-then-delete-old to avoid disappearance flicker (brief duplication is less jarring)
+
+Investigate option 1 first; can test live if API docs are unclear.
+
 ### Automatic file transfer to Telegram
 
 Currently, files the bot creates or edits are invisible in Telegram — the user has to manually request them. The `telegram_send_file` tool exists but requires the agent to explicitly call it. Better approaches:
@@ -44,6 +78,14 @@ Open questions:
 - Size limits? Telegram allows 50MB per file (without local API server). Skip larger files with a note?
 - Binary vs text? Send text files as documents with syntax-highlighted captions?
 - Deduplication in a single turn? If the agent edits the same file 3 times, send only the final version?
+
+---
+
+## AGENTS.md
+
+### Mandate updating docs after changes
+
+The agent should proactively update ARCHITECTURE.md, README.md, knowledge base, and all tracked docs to reflect changes, decisions, and user preferences. Check if already stated; if not, add it explicitly.
 
 ---
 
