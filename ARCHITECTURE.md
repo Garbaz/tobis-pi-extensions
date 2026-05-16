@@ -9,15 +9,16 @@ For development conventions, see `AGENTS.md`.
 
 ## Telegram Extension
 
-### Three-Layer Architecture
+### Two-Layer Architecture
 
-The telegram extension operates across three layers that must be cleanly separated. When editing, pay attention to which layer a piece of state belongs to -- session-layer state must not live in the instance singleton, and relay-layer state must not be torn down on session changes.
+The telegram extension operates across two layers. The relay is a role, not a separate layer -- one instance wins the lock and becomes the relay poller.
 
 | Layer | Scope | Lifetime | Key State |
 |-------|-------|----------|-----------|
-| **Relay** | Bot token + polling | Process-lifetime (single poller) | `RelayServer`, `RelayClient`, `polling`, `lastUpdateId`, `relayLock` |
-| **Instance** | Pi process | Process-lifetime (pi start to pi quit) | `api`, `bridge`, `botUsername`, `topicsEnabled`, `config`, `pendingUsers` |
-| **Session** | Pi session | Session-lifetime (/new, /resume, /fork, /reload) | `sessionId`, `sessionFile`, `topicRenamed`, `ctx`, threadId/topicName in session data |
+| **Instance** | Pi process | Process-lifetime (pi start to pi quit) | `TelegramState` (api, bridge, config, pendingUsers, registry), relay role (RelayServer/Client, polling) |
+| **Session** | Pi session | Session-lifetime (/new, /resume, /fork, /reload) | `SessionHandle` (sessionId, sessionFile, threadId, topicName, topicRenamed, outgoing, ctx) |
+
+Session state lives in `SessionRegistry` (process-lifetime container, session-lifetime handles). The registry owns the threadId↔sessionId reverse mapping and active session tracking. `TopicManager` handles Telegram API calls (create/restore/close/rename topics) but delegates routing to the registry.
 
 ### Session Lifecycle: Pi Events and Telegram Mapping
 
@@ -77,7 +78,7 @@ Telegram session state is persisted as a companion file next to pi's session `.j
 
 The path is derived from `ctx.sessionManager.getSessionFile()` via `sessionDataPath()`. This is critical because pi's `sessionDir` is shared across all sessions in the same CWD -- two pi instances in `/home/user/project` both resolve to the same `--home-user-project--` directory. A shared file would cause cross-talk and data clobbering. The companion-file approach matches pi's own naming convention and requires no custom directory structure.
 
-The `sessionFile` (not `sessionDir`) is stored in `SessionState` and passed to all session-data functions.
+The `sessionFile` (not `sessionDir`) is stored in `SessionHandle` and passed to all session-data functions.
 
 ### Config vs Runtime State
 
@@ -89,7 +90,7 @@ Session data uses an explicit `connected: boolean` field (not file-existence). A
 
 ### Topic Lifecycle
 
-Topics are created immediately on connect (not lazily on first message). The topic name starts as the CWD basename, then renames to `basename . snippet` on the first user message -- from either TUI or Telegram (via the `input` event). This ensures TUI-originated sessions also get meaningful topic names. The rename is one-shot (tracked by `topicRenamed` in session state); topics with a middle dot already in the name are considered already renamed.
+Topics are created immediately on connect (not lazily on first message). The topic name starts as the CWD basename, then renames to `basename . snippet` on the first user message -- from either TUI or Telegram (via the `input` event). This ensures TUI-originated sessions also get meaningful topic names. The rename is one-shot (tracked by `topicRenamed` in `SessionHandle`); topics with a middle dot already in the name are considered already renamed.
 
 ### General Topic Routing
 
@@ -110,6 +111,7 @@ When multiple pi processes share one bot token, only one can long-poll `getUpdat
 - **Clients**: connect to the relay socket, subscribe to specific forum topic threads, receive matching updates.
 - **Outgoing**: all instances send directly to the Telegram API -- outgoing messages don't go through the relay.
 - **Failover**: if the relay process dies, the lock goes stale, and a client acquires it and becomes the new relay.
+- **Thread subscriptions**: `connection.subscribeThread(threadId, sessionId)` dispatches to relay server (`subscribeLocal`) or relay client (`subscribe`) depending on the instance's role. On failover, existing session threads are re-subscribed.
 
 ### Notification Strategy
 

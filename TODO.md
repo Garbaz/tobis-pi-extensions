@@ -6,16 +6,6 @@ Planned features, open questions, and known bugs.
 
 ## Telegram Extension
 
-### Cross-talk: relay General-subscriber fallback
-
-The relay's `routeUpdate()` uses a General-subscriber fallback that leaks non-General messages to all clients. `shouldSkipLocal()` uses `hasSubscriber()` which doesn't include the relay's own thread subscriptions (`localSubscriptions`). The fields `localSubscriptions` and `localSubscribedGeneral` exist on `RelayServer` but have no routing logic or population methods.
-
-Fix plan:
-1. Add `subscribeLocal(threadId)` / `unsubscribeLocal(threadId)` / `subscribeLocalGeneral()` / `unsubscribeLocalGeneral()` methods to `RelayServer`.
-2. Call these from `lifecycle.ts` when the relay's own session registers a topic.
-3. Update `hasSubscriber()` and `shouldSkipLocal()` to include `localSubscriptions`.
-4. Fix `routeUpdate()`: General fallback should only apply to `threadId === 0` (actual General messages), not to orphaned thread messages that no client subscribes to.
-
 ### `/fork` behavior
 
 When a user runs `/fork` from Telegram, what happens? Pi fires `session_before_fork` then `session_shutdown(reason="fork")` then `session_start(reason="fork")`. Options:
@@ -39,18 +29,6 @@ Known bug: `renameTopicFromMessage` fires on the first `input` where `topicRenam
 
 Planned fix: Capture the first user message text in session data on the `input` event. When the topic is created (or if it exists and hasn't been renamed), use the captured text as the snippet. Ensures the topic name always reflects the first meaningful input, regardless of when the telegram connection is established.
 
-### `session_shutdown` layer bug
-
-On `reason=quit`, `shutdown()` is called but `teardownSession()` is skipped -- the topic is never closed and the session is never unregistered from the bridge. Fix: call `teardownSession()` + `removeSession()` before `shutdown()` when the reason is quit.
-
-### State separation
-
-`state.ts` mixes relay-layer state (`isRelay`, `relayServer`, `relayClient`, `polling`, `lastUpdateId`) with instance-layer state (`api`, `bridge`, `botUsername`, `topicsEnabled`, `config`, `pendingUsers`, `pendingNewSession`). Split into separate relay/instance/session state objects.
-
-### Session-layer state scattered across modules
-
-`SessionState` (in `state.ts`) holds `sessionId`, `sessionFile`, `topicRenamed`, `ctx`. But threadId/topicName mapping lives in `TopicManager` (in-memory map in `topics.ts`), threadId/topicName persistence lives in `TelegramSessionData` (also `topics.ts`), and `bridge.ts` holds `outgoingBySession` and `currentSessionId`. Consolidate session-layer state.
-
 ### `/telegram status` is instance-only
 
 Shows connection state, whitelist/blacklist, pending users. Does not show session-specific info (which topic, which model, which session ID). Should be contextual: in General topic show instance + relay info; in session topic show session-specific info.
@@ -68,6 +46,16 @@ Open questions:
 - Size limits? Telegram allows 50MB per file (without local API server). Skip larger files with a note?
 - Binary vs text? Send text files as documents with syntax-highlighted captions?
 - Deduplication in a single turn? If the agent edits the same file 3 times, send only the final version?
+
+### Bridge dissolution (in progress)
+
+The `TelegramBridge` class still has too many responsibilities: incoming message handling, outgoing dispatch delegation, session registration, topic management delegation, callback dispatch, turn context tracking, and reaction tracking. Most of these can move to more focused modules:
+
+- Incoming routing → `incoming.ts` (already partially there via `handleUpdate`)
+- Outgoing dispatch → `SessionHandle.outgoing` (already in registry)
+- Session registration → `SessionRegistry` + `connection.ts`
+- Turn context → could move to `incoming.ts` or a thin wrapper
+- Callback dispatch → could stay in bridge or move to its own module
 
 ### Session commands scattered
 
