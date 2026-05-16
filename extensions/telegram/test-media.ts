@@ -25,17 +25,7 @@ import type {
 	Message,
 	MediaType,
 	MediaProcessor,
-	Voice,
-	Audio,
-	PhotoSize,
-	Video,
-	VideoNote,
-	Document,
 	Sticker,
-	Location,
-	Venue,
-	Contact,
-	Dice as DiceType,
 	Poll,
 } from "./types.js";
 import { TelegramApi } from "./api.js";
@@ -100,14 +90,14 @@ const baseMessage: Message = {
 	chat: { id: 456, type: "private" },
 };
 
-const voiceMsg: Message = { ...baseMessage, voice: { file_id: "voice123", file_unique_id: "uv", duration: 5, mime_type: "audio/ogg" } as Voice };
-const audioMsg: Message = { ...baseMessage, audio: { file_id: "audio123", file_unique_id: "ua", duration: 120, mime_type: "audio/mpeg", file_name: "song.mp3" } as Audio };
-const photoMsg: Message = { ...baseMessage, photo: [{ file_id: "photo_sm", file_unique_id: "up1", width: 90, height: 90 }, { file_id: "photo_lg", file_unique_id: "up2", width: 800, height: 600 }] as PhotoSize[] };
-const videoMsg: Message = { ...baseMessage, video: { file_id: "video123", file_unique_id: "uv2", width: 1920, height: 1080, duration: 30, mime_type: "video/mp4", file_name: "clip.mp4" } as Video };
-const videoNoteMsg: Message = { ...baseMessage, video_note: { file_id: "vn123", file_unique_id: "uvn", length: 240, duration: 15 } as VideoNote };
+const voiceMsg: Message = { ...baseMessage, voice: { file_id: "voice123", file_unique_id: "uv", duration: 5, mime_type: "audio/ogg" } };
+const audioMsg: Message = { ...baseMessage, audio: { file_id: "audio123", file_unique_id: "ua", duration: 120, mime_type: "audio/mpeg", file_name: "song.mp3" } };
+const photoMsg: Message = { ...baseMessage, photo: [{ file_id: "photo_sm", file_unique_id: "up1", width: 90, height: 90 }, { file_id: "photo_lg", file_unique_id: "up2", width: 800, height: 600 }] };
+const videoMsg: Message = { ...baseMessage, video: { file_id: "video123", file_unique_id: "uv2", width: 1920, height: 1080, duration: 30, mime_type: "video/mp4", file_name: "clip.mp4" } };
+const videoNoteMsg: Message = { ...baseMessage, video_note: { file_id: "vn123", file_unique_id: "uvn", length: 240, duration: 15 } };
 const animMsg: Message = { ...baseMessage, animation: { file_id: "anim123", file_unique_id: "ua2", width: 320, height: 240, duration: 3, file_name: "animation.gif.mp4", mime_type: "video/mp4" } };
-const docMsg: Message = { ...baseMessage, document: { file_id: "doc123", file_unique_id: "ud", file_name: "report.pdf", mime_type: "application/pdf" } as Document };
-const stickerMsg: Message = { ...baseMessage, sticker: { file_id: "sticker123", file_unique_id: "us", width: 512, height: 512, is_animated: false, is_video: false, type: "regular", emoji: "😀" } as Sticker };
+const docMsg: Message = { ...baseMessage, document: { file_id: "doc123", file_unique_id: "ud", file_name: "report.pdf", mime_type: "application/pdf" } };
+const stickerMsg: Message = { ...baseMessage, sticker: { file_id: "sticker123", file_unique_id: "us", width: 512, height: 512, is_animated: false, is_video: false, type: "regular", emoji: "{1F600}" } as Sticker };
 
 const testDir = "/tmp/pi-telegram-media-test";
 rmSync(testDir, { recursive: true, force: true });
@@ -201,16 +191,16 @@ assertEqual(detectContentTypes(photoMsg), ["photo"], "photo → [photo]");
 const photoWithCaption: Message = { ...photoMsg, caption: "Look at this!" };
 assertEqual(detectContentTypes(photoWithCaption), ["photo", "caption"], "photo+caption → [photo, caption]");
 
-const locationMsg: Message = { ...baseMessage, location: { latitude: 48.0, longitude: 7.8 } as Location };
+const locationMsg: Message = { ...baseMessage, location: { latitude: 48.0, longitude: 7.8 } };
 assertEqual(detectContentTypes(locationMsg), ["location"], "location → [location]");
 
-const contactMsg: Message = { ...baseMessage, contact: { phone_number: "+491234567", first_name: "John" } as Contact };
+const contactMsg: Message = { ...baseMessage, contact: { phone_number: "+491234567", first_name: "John" } };
 assertEqual(detectContentTypes(contactMsg), ["contact"], "contact → [contact]");
 
-const diceMsg: Message = { ...baseMessage, dice: { emoji: "🎲", value: 4 } as DiceType };
+const diceMsg: Message = { ...baseMessage, dice: { emoji: "🎲", value: 4 } };
 assertEqual(detectContentTypes(diceMsg), ["dice"], "dice → [dice]");
 
-const pollMsg: Message = { ...baseMessage, poll: { id: "p1", question: "Time?", options: [{ text: "9am", voter_count: 3 }, { text: "10am", voter_count: 5 }], total_voter_count: 8, is_closed: false, is_anonymous: true, type: "regular", allows_multiple_answers: false } as Poll };
+const pollMsg: Message = { ...baseMessage, poll: { id: "p1", question: "Time?", options: [{ text: "9am", voter_count: 3 }, { text: "10am", voter_count: 5 }], total_voter_count: 8, is_closed: false, is_anonymous: true, type: "regular", allows_multiple_answers: false } };
 assertEqual(detectContentTypes(pollMsg), ["poll"], "poll → [poll]");
 
 section("Data-only formatters");
@@ -224,25 +214,25 @@ const liveLoc = formatLocation({ latitude: 48.0, longitude: 7.8, live_period: 36
 assertIncludes(liveLoc, "live for 60min", "live location → period");
 assertIncludes(liveLoc, "heading 90°", "live location → heading");
 
-const venue = formatVenue({ location: { latitude: 48.0, longitude: 7.8 }, title: "Café Central", address: "Hauptstr. 5" } as Venue);
+const venue = formatVenue({ location: { latitude: 48.0, longitude: 7.8 }, title: "Café Central", address: "Hauptstr. 5" });
 assertIncludes(venue, "Café Central", "venue → title");
 assertIncludes(venue, "Hauptstr. 5", "venue → address");
 assertIncludes(venue, "openstreetmap.org", "venue → map link");
 
-const contact = formatContact({ phone_number: "+491234567", first_name: "John", last_name: "Doe" } as Contact);
+const contact = formatContact({ phone_number: "+491234567", first_name: "John", last_name: "Doe" });
 assertIncludes(contact, "John Doe", "contact → name");
 assertIncludes(contact, "+491234567", "contact → phone");
 
-assertEqual(formatDice({ emoji: "🎲", value: 4 } as DiceType), "🎲 Rolled: 4", "dice format");
+assertEqual(formatDice({ emoji: "🎲", value: 4 }), "🎲 Rolled: 4", "dice format");
 
-const poll = formatPoll({ id: "p1", question: "Time?", options: [{ text: "9am", voter_count: 3 }, { text: "10am", voter_count: 5 }], total_voter_count: 8, is_closed: false, is_anonymous: true, type: "regular", allows_multiple_answers: false } as Poll);
+const poll = formatPoll({ id: "p1", question: "Time?", options: [{ text: "9am", voter_count: 3 }, { text: "10am", voter_count: 5 }], total_voter_count: 8, is_closed: false, is_anonymous: true, type: "regular", allows_multiple_answers: false });
 assertIncludes(poll, "Poll: Time?", "poll → question");
 assertIncludes(poll, "9am — 3 votes", "poll → option 1");
 assertIncludes(poll, "10am — 5 votes", "poll → option 2");
 assertIncludes(poll, "Total: 8 voters", "poll → total");
 assertIncludes(poll, "anonymous", "poll → anonymous");
 
-const quiz = formatPoll({ id: "q1", question: "Capital?", options: [{ text: "Berlin", voter_count: 5 }, { text: "Munich", voter_count: 2 }], total_voter_count: 7, is_closed: true, is_anonymous: false, type: "quiz", allows_multiple_answers: false, correct_option_id: 0 } as Poll);
+const quiz = formatPoll({ id: "q1", question: "Capital?", options: [{ text: "Berlin", voter_count: 5 }, { text: "Munich", voter_count: 2 }], total_voter_count: 7, is_closed: true, is_anonymous: false, type: "quiz", allows_multiple_answers: false, correct_option_id: 0 });
 assertIncludes(quiz, "Quiz", "quiz → type label");
 assertIncludes(quiz, "[closed]", "quiz → closed");
 assertIncludes(quiz, "✓ Berlin", "quiz → correct marker");
