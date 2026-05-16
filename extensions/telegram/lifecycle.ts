@@ -306,8 +306,10 @@ async function attemptFailover(): Promise<void> {
 		state.relayClient?.disconnect();
 		state.relayClient = undefined;
 
-		// Brief backoff to let the new relay start its socket
-		await new Promise((resolve) => setTimeout(resolve, 500));
+		// Random jitter backoff to let the new relay start its socket
+		// and reduce race between multiple clients trying to reconnect
+		const jitter = 100 + Math.random() * 900;
+		await new Promise((resolve) => setTimeout(resolve, jitter));
 
 		// Retry as client
 		const retryCount = 5;
@@ -326,8 +328,9 @@ async function attemptFailover(): Promise<void> {
 			);
 			if (connected) break;
 
-			// Wait before retrying
-			await new Promise((resolve) => setTimeout(resolve, 500 * (i + 1)));
+			// Exponential backoff with jitter before retrying
+			const delay = 200 * Math.pow(1.5, i) + Math.random() * 300;
+			await new Promise((resolve) => setTimeout(resolve, delay));
 			state.relayClient = undefined;
 		}
 

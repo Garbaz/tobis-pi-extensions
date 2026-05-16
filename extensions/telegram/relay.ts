@@ -75,6 +75,26 @@ export class RelayServer {
 	/** Whether the relay (local) instance is subscribed to General (threadId 0). */
 	private localSubscribedGeneral = false;
 
+	/** Subscribe the relay's own instance to a thread.
+	 *  Called when a local session registers a topic. */
+	subscribeLocal(threadId: number): void {
+		if (threadId === 0) {
+			this.localSubscribedGeneral = true;
+		} else {
+			this.localSubscriptions.add(threadId);
+		}
+	}
+
+	/** Unsubscribe the relay's own instance from a thread.
+	 *  Called when a local session unregisters a topic. */
+	unsubscribeLocal(threadId: number): void {
+		if (threadId === 0) {
+			this.localSubscribedGeneral = false;
+		} else {
+			this.localSubscriptions.delete(threadId);
+		}
+	}
+
 	/** Start the relay server. Call after acquiring the lock. */
 	async start(): Promise<void> {
 		await ensureRunDir();
@@ -132,7 +152,19 @@ export class RelayServer {
 		log.info({ path: RELAY_SOCKET_PATH }, "Relay server listening");
 	}
 
-	/** Route an update to subscribed clients. */
+	/** Route an update to subscribed clients.
+	 *  The relay instance processes updates locally via shouldSkipLocal() --
+	 *  this method only handles client distribution.
+	 *
+	 *  Routing order:
+	 *  1. my_chat_member -> broadcast to ALL clients (always)
+	 *  2. Thread-specific subscriber -> route to that client
+	 *  3. General topic (threadId 0) -> route to General subscribers
+	 *  4. No subscriber at all -> broadcast to all (first message / pairing)
+	 *
+	 *  IMPORTANT: Non-General messages with no subscriber are broadcast
+	 *  only when NO client AND NO local subscription owns the thread.
+	 *  This prevents leaking thread-specific messages to unrelated clients. */
 	routeUpdate(update: Update): void {
 		const threadId = threadIdFromUpdate(update);
 
@@ -144,35 +176,37 @@ export class RelayServer {
 			return;
 		}
 
-		// Route to clients subscribed to this thread
-		let routed = false;
+		const isGeneral = threadId === 0;
+
+		// Step 1: Route to clients subscribed to this specific thread
 		for (const [socket, client] of this.clients) {
 			if (client.subscriptions.has(threadId)) {
 				this.send(socket, { type: "update", threadId, data: update });
-				routed = true;
 			}
 		}
 
-		// General topic (threadId 0) or no subscriber - send to General subscribers
-		if (!routed || threadId === 0) {
+		// Step 2: For General topic, also send to General subscribers
+		// (who may not have a specific thread subscription for threadId 0)
+		if (isGeneral) {
 			for (const [socket, client] of this.clients) {
 				if (client.subscribedGeneral && !client.subscriptions.has(threadId)) {
 					this.send(socket, { type: "update", threadId, data: update });
-					routed = true;
 				}
 			}
 		}
 
-		// If still no subscriber, broadcast to all (first message / pairing)
-		if (!routed) {
+		// Step 3: If no client owns this thread AND the local instance
+		// doesn't own it either, broadcast to all (first message / pairing).
+		// This only fires for truly orphaned messages.
+		if (!this.hasClientSubscriber(threadId) && !this.hasLocalSubscriber(threadId)) {
 			for (const [socket] of this.clients) {
 				this.send(socket, { type: "update", threadId, data: update });
 			}
 		}
 	}
 
-	/** Whether any client is subscribed to this thread ID. */
-	hasSubscriber(threadId: number): boolean {
+	/** Whether any client (not local) is subscribed to this thread ID. */
+	private hasClientSubscriber(threadId: number): boolean {
 		for (const [, client] of this.clients) {
 			if (client.subscriptions.has(threadId)) return true;
 			if (threadId === 0 && client.subscribedGeneral) return true;
@@ -180,14 +214,36 @@ export class RelayServer {
 		return false;
 	}
 
+	/** Whether the local (relay) instance is subscribed to this thread ID. */
+	private hasLocalSubscriber(threadId: number): boolean {
+		if (threadId === 0) return this.localSubscribedGeneral;
+		return this.localSubscriptions.has(threadId);
+	}
+
+	/** Whether any subscriber (client or local) owns this thread ID.
+	 *  Public: used by external callers to check if a thread is owned. */
+	hasSubscriber(threadId: number): boolean {
+		return this.hasClientSubscriber(threadId) || this.hasLocalSubscriber(threadId);
+	}
+
 	/** Whether the relay should skip local processing for this update.
-	 *  Returns true if a relay client owns this thread (meaning the client
+	 *  Returns true if a CLIENT owns this thread (meaning the client
 	 *  will handle it), unless it's a my_chat_member update (always processed
-	 *  locally AND routed). */
+	 *  locally AND routed).
+	 *
+	 *  If the LOCAL instance also owns the thread, it should NOT skip --
+	 *  both local and client processing happen (client gets it via routeUpdate,
+	 *  relay processes it locally). But if ONLY a client owns it, the relay
+	 *  skips to avoid double-handling. */
 	shouldSkipLocal(update: Update): boolean {
 		if (update.my_chat_member) return false; // always process locally
 		const threadId = threadIdFromUpdate(update);
-		return this.hasSubscriber(threadId);
+
+		// If the local instance owns this thread, always process locally
+		if (this.hasLocalSubscriber(threadId)) return false;
+
+		// If a client owns this thread, skip local (the client handles it)
+		return this.hasClientSubscriber(threadId);
 	}
 
 	/** Broadcast the current polling cursor to all clients (for failover). */

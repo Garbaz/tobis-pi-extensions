@@ -377,15 +377,16 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 
 	// On session shutdown: tear down session state. Only stop polling on process exit.
 	extensionApi.on("session_shutdown", async (event: SessionShutdownEvent, ctx: ExtensionContext) => {
-		const sessionId = getSessionId(ctx);
-		if (!sessionId) return; // stale ctx - ignore
-
 		const { reason } = event;
-		removeSession(sessionId);
-		await teardownSession(sessionId);
+		const sessionId = getSessionId(ctx);
 
-		// Only fully disconnect on process exit
-		// On reload/new/resume/fork, polling continues - the next session_start will re-register
+		if (sessionId) {
+			removeSession(sessionId);
+			await teardownSession(sessionId);
+		}
+
+		// On process exit, fully disconnect even if sessionId was stale.
+		// On reload/new/resume/fork, polling continues - the next session_start will re-register.
 		if (reason === "quit") {
 			await shutdown();
 		}
