@@ -15,7 +15,6 @@ import { getMediaDir, getMediaInfo, downloadMediaFile, processMedia, truncatePro
 import { checkUserAuth } from "./config.js";
 import { state, currentSession, safeCtx, notify, getActiveChatId, lockToChat, unlockChat, consumeTelegramContext, dispatchCallbackQuery, type PendingUser, notifyError } from "./state.js";
 import { OutgoingHandler } from "./outgoing.js";
-import { ensureTopicCreated } from "./session.js";
 import { createLogger } from "./log.js";
 const log = createLogger("incoming");
 
@@ -323,20 +322,14 @@ async function handleMessage(
 	const result = await formatMessageContent(message, isEdit, api, config);
 	if (!result) return undefined; // No actionable content
 
-	// Ensure the forum topic exists (fallback in case it wasn't created on connect)
-	const threadId = await ensureTopicCreated();
-
-	// Note: topic rename is handled by the 'input' event in index.ts,
-	// which fires for both TUI and Telegram messages.
-
-	// Echo media processor output to the Telegram chat so the user can see
-	// what the bot understood from the photo/voice/etc.
+	// Echo media processor output to the session's topic thread
+	// so the user can see what the bot understood from their photo/voice/etc.
 	if (result.mediaEcho) {
 		const chatId = message.chat.id;
 		void api.sendMessage({
 			chat_id: chatId,
 			text: result.mediaEcho,
-			message_thread_id: threadId,
+			message_thread_id: message.message_thread_id,
 			disable_notification: true,
 		}).catch(() => {});
 	}

@@ -215,41 +215,8 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 	return { action: "skipped" };
 }
 
-/** Ensure the forum topic for the current session exists.
- *  Topics are created immediately on connect, but this serves as a fallback
- *  if the topic wasn't created yet (e.g. topics were enabled after connect).
- *  Returns the thread ID, or undefined if topics are disabled. */
-export async function ensureTopicCreated(): Promise<number | undefined> {
-	const sess = currentSession();
-	const tm = state.topicManager;
-	log.debug({ hasSession: !!sess, hasTm: !!tm }, "ensureTopicCreated");
-	if (!sess || !tm) return undefined;
-
-	log.debug({ sessionId: sess.sessionId.slice(0, 8) }, "ensureTopicCreated: checking");
-
-	// Check if topic already exists
-	const existingTopic = tm.getSessionTopic(sess.sessionId);
-	log.debug({ sessionId: sess.sessionId.slice(0, 8), threadId: existingTopic?.threadId, topicName: existingTopic?.name }, "ensureTopicCreated: existing");
-	if (existingTopic) {
-		return existingTopic.threadId;
-	}
-
-	// Topic doesn't exist yet - create it now (fallback)
-	const iconColor = TOPIC_ICON_COLORS[Math.floor(Math.random() * TOPIC_ICON_COLORS.length)];
-	const label = cwdBasename();
-	log.debug({ label, sessionId: sess.sessionId.slice(0, 8) }, "ensureTopicCreated: creating fallback topic");
-
-	const threadId = await registerSession(sess.sessionId, label, undefined, iconColor);
-	log.debug({ threadId }, "ensureTopicCreated: registered");
-	if (threadId !== undefined) {
-		activateSession(sess.sessionId);
-		await saveSessionFields(sess.sessionFile, { connected: true, threadId, topicName: label });
-	}
-	return threadId;
-}
-
 /** Rename the session's topic on first user message.
- *  Format: "basename · snippet". Only renames once (flag in SessionHandle).
+ *  Format: "basename \u00B7 snippet". Only renames once (flag in SessionHandle).
  *  Skipped if topic was already renamed in a previous session (resumed). */
 export async function renameTopicFromMessage(text: string): Promise<void> {
 	const sess = currentSession();
