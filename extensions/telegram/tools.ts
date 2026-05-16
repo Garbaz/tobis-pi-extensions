@@ -5,7 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import type { TelegramApi } from "./api.js";
-import { state, queueFile } from "./state.js";
+import { state } from "./state.js";
 
 /** Queued file to send as a Telegram attachment. */
 export interface PendingFile {
@@ -197,7 +197,7 @@ export function registerTools(pi: ExtensionAPI): void {
 			// Queue files on the active session's outgoing handler
 			const caption = params.caption;
 			for (let i = 0; i < resolvedPaths.length; i++) {
-				queueFile({
+				state.registry.getActive()?.outgoing?.queueFile({
 					path: resolvedPaths[i],
 					caption: i === 0 ? caption : undefined,
 				});

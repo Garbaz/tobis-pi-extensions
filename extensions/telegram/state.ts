@@ -194,72 +194,10 @@ export async function dispatchCallbackQuery(query: import("./types.js").Callback
 	return false;
 }
 
-// ── Outgoing Dispatch Helpers ────────────────────────────────────────────────
-// Thin wrappers over the active session's outgoing handler.
-// These replace the bridge's outgoing delegation methods.
-
-/** Send final response and update reaction on agent_end. */
-export async function dispatchAgentEnd(event: { messages: unknown[] }, ctx: ExtensionContext): Promise<void> {
-	const outgoing = state.registry.getActive()?.outgoing;
-	if (outgoing) await outgoing.onAgentEnd(event, ctx);
-}
-
-/** Update streaming preview on message_update. */
-export async function dispatchMessageUpdate(event: { message: unknown; assistantMessageEvent: unknown }, ctx: ExtensionContext): Promise<void> {
-	const outgoing = state.registry.getActive()?.outgoing;
-	if (outgoing) await outgoing.onMessageUpdate(event, ctx);
-}
-
-/** Flush any pending streaming edit. */
-export async function flushPendingEdit(): Promise<void> {
-	const outgoing = state.registry.getActive()?.outgoing;
-	if (outgoing) await outgoing.flushPendingEdit();
-}
-
-/** Start sending typing indicators. */
-export function startTypingIndicator(ctx: ExtensionContext): void {
-	const outgoing = state.registry.getActive()?.outgoing;
-	if (outgoing) outgoing.startTypingIndicator(ctx);
-}
-
-/** Stop the typing indicator. */
-export function stopTypingIndicator(): void {
-	const outgoing = state.registry.getActive()?.outgoing;
-	if (outgoing) outgoing.stopTypingIndicator();
-}
-
-/** Queue a file for sending on the next agent_end. */
-export function queueFile(file: import("./tools.js").PendingFile): void {
-	const outgoing = state.registry.getActive()?.outgoing;
-	if (outgoing) outgoing.queueFile(file);
-}
-
-/** Echo a TUI-originated user message to Telegram. */
-export async function sendUserEcho(text: string): Promise<void> {
-	const outgoing = state.registry.getActive()?.outgoing;
-	if (outgoing) await outgoing.sendUserEcho(text);
-}
-
-/** Notify Telegram of tool execution start. */
-export async function dispatchToolStart(toolName: string, args: Record<string, unknown>): Promise<void> {
-	const outgoing = state.registry.getActive()?.outgoing;
-	if (outgoing) await outgoing.onToolExecutionStart(toolName, args);
-}
-
-/** Notify Telegram of tool execution end. */
-export function dispatchToolEnd(toolName: string, args: Record<string, unknown>, isError: boolean): void {
-	const outgoing = state.registry.getActive()?.outgoing;
-	if (outgoing) outgoing.onToolExecutionEnd(toolName, args, isError);
-}
-
-// ── Session Access Helpers ────────────────────────────────────────────────────
-// Thin wrappers over state.registry. Callers can also access the registry
-// directly when they need setThread, hasThread, getThreadIds, etc.
-
-/** Get a session handle by ID. Returns undefined if not tracked. */
-export function getSession(sessionId: string): SessionHandle | undefined {
-	return state.registry.get(sessionId);
-}
+// ── Session Access Helpers ────────────────────────────────────────────────
+// Thin wrappers over state.registry for frequently-used operations.
+// Callers that need advanced registry operations (setThread, hasThread,
+// getThreadIds, getByThread, values) import from session-registry directly.
 
 /** Get the current (most recently active) session handle. Returns undefined if none. */
 export function currentSession(): SessionHandle | undefined {
@@ -332,6 +270,7 @@ export function subscribeThread(threadId: number, sessionId: string): void {
 export function unsubscribeThread(threadId: number): void {
 	_unsubscribeThread?.(threadId);
 }
+// ── Session Access ──────────────────────────────────────────────────────────
 // Callers that need SessionHandle type or advanced registry operations
 // can import from session-registry.ts directly.
 

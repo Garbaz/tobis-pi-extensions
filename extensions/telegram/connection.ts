@@ -14,7 +14,7 @@ import { tryAcquireRelayLock, releaseRelayLock } from "./relay-lock.js";
 import { handleIncomingUpdate, setAcceptCallback } from "./incoming.js";
 import { createLogger, flushLogs } from "./log.js";
 const log = createLogger("lifecycle");
-import { state, updateStatus, notify, currentSession, safeCtx, lockToChat, unlockChat, stopTypingIndicator, setSubscriptionCallbacks, clearSubscriptionCallbacks, notifyError, notifyWarn } from "./state.js";
+import { state, updateStatus, notify, currentSession, safeCtx, lockToChat, unlockChat, setSubscriptionCallbacks, clearSubscriptionCallbacks, notifyError, notifyWarn } from "./state.js";
 import { setupSessionTopic, setTopicsEnabled } from "./session.js";
 import { saveSessionFields } from "./topics.js";
 
@@ -140,7 +140,7 @@ export async function disconnect(ctx: ExtensionCommandContext | ExtensionContext
 		state.relayClient?.disconnect();
 		state.relayClient = undefined;
 	}
-	stopTypingIndicator();
+	state.registry.getActive()?.outgoing?.stopTypingIndicator();
 	unlockChat();
 	clearSubscriptionCallbacks();
 	// Clear runtime state - after disconnect, API is stale
@@ -176,7 +176,7 @@ export async function shutdown(): Promise<void> {
 		state.relayClient?.disconnect();
 		state.relayClient = undefined;
 	}
-	stopTypingIndicator();
+	state.registry.getActive()?.outgoing?.stopTypingIndicator();
 	unlockChat();
 	clearSubscriptionCallbacks();
 	// Clear runtime state

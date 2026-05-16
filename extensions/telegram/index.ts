@@ -57,7 +57,7 @@ interface ToolExecutionEndEvent {
 }
 import { registerTools } from "./tools.js";
 import { readSessionData } from "./topics.js";
-import { state, isTelegramConnected, updateStatus, initSession, removeSession, activateSession, currentSession, refreshSessionCtx, getActiveChatId, consumeTelegramContext, startTypingIndicator, stopTypingIndicator, dispatchAgentEnd, dispatchMessageUpdate, dispatchToolStart, dispatchToolEnd, sendUserEcho } from "./state.js";
+import { state, isTelegramConnected, updateStatus, initSession, removeSession, activateSession, currentSession, refreshSessionCtx, getActiveChatId, consumeTelegramContext } from "./state.js";
 import { connect, disconnect, shutdown } from "./connection.js";
 import { readConfig, updateConfig, saveConfigField, allowUser, blockUser, validateMediaConfig } from "./config.js";
 import { setupSessionTopic, teardownSession, renameTopicFromMessage, type SessionStartReason } from "./session.js";
@@ -400,7 +400,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 
 		// Activate the correct session's outgoing handler for this turn
 		activateSession(sessionId);
-		startTypingIndicator(ctx);
+		state.registry.getActive()?.outgoing?.startTypingIndicator(ctx);
 	});
 
 	// Inject telegram context into system prompt - only on Telegram-originated turns
@@ -429,8 +429,11 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		// Refresh ctx in session map for long-lived callbacks
 		refreshSessionCtx(sessionId, ctx);
 
-		stopTypingIndicator();
-		await dispatchAgentEnd(event, ctx);
+		const outgoing = state.registry.getActive()?.outgoing;
+		if (outgoing) {
+			outgoing.stopTypingIndicator();
+			await outgoing.onAgentEnd(event, ctx);
+		}
 	});
 
 	extensionApi.on("message_update", async (event: MessageUpdateEvent, ctx: ExtensionContext) => {
@@ -440,7 +443,8 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		// Refresh ctx in session map for long-lived callbacks
 		refreshSessionCtx(sessionId, ctx);
 
-		await dispatchMessageUpdate(event, ctx);
+		const outgoing = state.registry.getActive()?.outgoing;
+		if (outgoing) await outgoing.onMessageUpdate(event, ctx);
 	});
 
 	// Echo TUI-originated user messages to Telegram
@@ -456,7 +460,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		void renameTopicFromMessage(event.text).catch(() => {});
 
 		if (event.source === "interactive" && getActiveChatId()) {
-			void sendUserEcho(event.text).catch(() => {});
+			void state.registry.getActive()?.outgoing?.sendUserEcho(event.text).catch(() => {});
 		}
 	});
 
@@ -469,7 +473,8 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		refreshSessionCtx(sessionId, ctx);
 
 		if (getActiveChatId()) {
-			await dispatchToolStart(event.toolName, event.args as Record<string, unknown>);
+			const outgoing = state.registry.getActive()?.outgoing;
+			if (outgoing) await outgoing.onToolExecutionStart(event.toolName, event.args as Record<string, unknown>);
 		}
 	});
 
@@ -481,7 +486,7 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 		refreshSessionCtx(sessionId, ctx);
 
 		if (getActiveChatId()) {
-			dispatchToolEnd(event.toolName, {}, event.isError);
+			state.registry.getActive()?.outgoing?.onToolExecutionEnd(event.toolName, {}, event.isError);
 		}
 	});
 
