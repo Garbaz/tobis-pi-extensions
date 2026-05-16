@@ -180,7 +180,6 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 					await saveConfigField("topics", state.config.topics);
 				}
 				state.topicsEnabled = state.config.topics !== false;
-				if (state.topicManager) state.topicManager.setTopicsEnabled(state.topicsEnabled);
 				ctx.ui.notify(`Telegram: topics ${state.config.topics !== false ? "enabled" : "disabled"}. Reconnect to apply.`, "info");
 				break;
 			}

@@ -4,7 +4,6 @@
 // and per-session outgoing handler references.
 //
 // Replaces the scattered session state that was previously split across:
-//   - TopicManager (threadId -> sessionId in-memory map)
 //   - scattered per-session state (now in SessionHandle)
 //
 // Layer: Instance (process-lifetime). Session handles are created/destroyed

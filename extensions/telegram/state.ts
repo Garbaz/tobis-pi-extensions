@@ -15,37 +15,17 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TelegramApi } from "./api.js";
 import type { TelegramPolling } from "./polling.js";
-import type { TelegramConfig } from "./types.js";
+import type { TelegramConfig, CallbackHandler, TelegramTurnContext, PendingUser } from "./types.js";
 import type { RelayServer, RelayClient } from "./relay.js";
-import type { TopicManager } from "./topics.js";
 import { SessionRegistry, type SessionHandle } from "./session-registry.js";
 // ── Types (moved from bridge.ts) ─────────────────────────────────────────────
 
-/** Handler for a Telegram callback query. Return true to consume, false to pass. */
-export type CallbackHandler = (query: import("./types.js").CallbackQuery, api: import("./api.js").TelegramApi) => Promise<boolean>;
-
-/** Context about the Telegram message that triggered the current turn.
- *  Set by incoming handler, consumed by before_agent_start to inject system prompt,
- *  cleared after injection so it doesn't leak into non-Telegram turns. */
-export interface TelegramTurnContext {
-	/** Telegram username (without @) of the sender, if available. */
-	username: string | undefined;
-	/** Content types present in the message. */
-	types: import("./formatting.js").ContentType[];
-	/** Media types that had no processor configured - raw file only, no transcription/description. */
-	unprocessed: import("./types.js").MediaType[];
-}
+// Types CallbackHandler, TelegramTurnContext, PendingUser are in types.ts.
+// Re-exported here for backward compatibility with importers.
+export type { CallbackHandler, TelegramTurnContext, PendingUser } from "./types.js";
 
 // ── Pending User ──────────────────────────────────────────────────────────────
-
-/** An unknown user who messaged the bot and is awaiting auth decision. */
-export interface PendingUser {
-	userId: number;
-	userName: string;
-	chatId: number;
-	/** ISO timestamp of first message. */
-	timestamp: string;
-}
+// (Moved to types.ts)
 
 // ── Instance State (process lifetime) ────────────────────────────────────────
 
@@ -67,8 +47,6 @@ export interface TelegramState {
 	// ── Instance state (moved from bridge) ────────────────────────────────
 	/** The chat ID currently locked to the Pi session. */
 	activeChatId: number | undefined;
-	/** Forum topic manager. Created on connect when topics are enabled. */
-	topicManager: TopicManager | undefined;
 	/** Context from the last Telegram message (consumed by before_agent_start). */
 	lastTelegramContext: TelegramTurnContext | undefined;
 	/** Registered callback query handlers, keyed by prefix. */
@@ -131,7 +109,6 @@ export const state: TelegramState = {
 	registry: new SessionRegistry(),
 	pendingNewSession: false,
 	activeChatId: undefined,
-	topicManager: undefined,
 	lastTelegramContext: undefined,
 	callbackHandlers: new Map(),
 };
@@ -152,9 +129,6 @@ export function lockToChat(chatId: number): void {
 	// Update outgoing handlers for all sessions
 	for (const handle of state.registry.values()) {
 		handle.outgoing?.setActiveChatId(chatId);
-	}
-	if (state.topicManager) {
-		state.topicManager.setChatId(chatId);
 	}
 }
 

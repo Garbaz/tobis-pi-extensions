@@ -481,7 +481,7 @@ async function routeToSession(msg: Message | undefined, chatId: number): Promise
 	if (handle) {
 		state.registry.setActive(handle.sessionId);
 		return undefined;
-	} else if (isGeneralTopic && state.topicManager) {
+	} else if (isGeneralTopic && state.api && state.topicsEnabled) {
 		// Message in General topic - route to current session and echo into the thread
 		const activeHandle = state.registry.getActive();
 		if (!activeHandle) return undefined;

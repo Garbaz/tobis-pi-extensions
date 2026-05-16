@@ -14,7 +14,7 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import type { TelegramConfig, MediaProcessor, MediaType } from "./types.js";
 import { checkConfig, applyDefaults, validateConfig as schemaValidate } from "./schema.js";
-import { CONFIG_DIR, CONFIG_PATH, STATE_PATH, OLD_STATE_PATH, ensureRunDir } from "./paths.js";
+import { CONFIG_DIR, CONFIG_PATH, STATE_PATH, ensureRunDir } from "./paths.js";
 
 const DEFAULT_CONFIG: TelegramConfig = {
 	botToken: undefined,
@@ -131,28 +131,9 @@ export async function updateConfig(partial: Partial<TelegramConfig>): Promise<Te
 // The lastUpdateId is a volatile polling cursor - it changes on every message
 // and should never be mixed into the user-editable config file.
 
-/** Migrate state file from /tmp to <agentDir>/run/telegram/ if the new location doesn't exist yet. */
-async function migrateStateFile(): Promise<void> {
-	try {
-		await readFile(STATE_PATH, "utf8");
-		return; // New location exists - no migration needed
-	} catch {
-		// New location doesn't exist - try to migrate from old location
-	}
-	if (OLD_STATE_PATH) {
-		try {
-			const oldData = await readFile(OLD_STATE_PATH, "utf8");
-			await writeFile(STATE_PATH, oldData, "utf8");
-		} catch {
-			// Old file doesn't exist either - nothing to migrate
-		}
-	}
-}
-
 /** Read lastUpdateId from state file. Returns undefined if no state exists. */
 export async function readLastUpdateId(): Promise<number | undefined> {
 	await ensureRunDir();
-	await migrateStateFile();
 	try {
 		const raw = JSON.parse(await readFile(STATE_PATH, "utf8"));
 		return typeof raw.lastUpdateId === "number" ? raw.lastUpdateId : undefined;

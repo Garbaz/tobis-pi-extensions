@@ -5,8 +5,7 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { OutgoingHandler } from "./outgoing.js";
-import { TopicManager } from "./topics.js";
-import { readSessionData, saveSessionFields } from "./topics.js";
+import { readSessionData, saveSessionFields, createForumTopic, reopenForumTopic, closeForumTopic, renameForumTopic, hideGeneralTopic } from "./topics.js";
 import { state, currentSession, activateSession, getActiveChatId, notify, subscribeThread, unsubscribeThread } from "./state.js";
 import { createLogger } from "./log.js";
 const log = createLogger("session");
@@ -59,83 +58,70 @@ export interface TopicSetupResult {
 }
 
 // ── Session Registration ─────────────────────────────────────────────────────
-// These methods manage the relationship between a session and its forum topic.
-// They create OutgoingHandler instances and register thread↔session mappings.
+// Creates a forum topic and sets up the session handle's outgoing handler.
+// Thread↔session mapping is registered in SessionRegistry.
 
-/** Register a session with a forum topic. Creates the topic if topics are enabled.
- *  Configures the session handle's outgoing handler with thread and chat info.
+/** Register a session with a new forum topic.
+ *  Creates the topic via the Telegram API, sets up the outgoing handler,
+ *  and registers the thread↔session mapping in the registry.
  *  Returns the thread ID, or undefined if topics are disabled. */
-export async function registerSession(sessionId: string, sessionName: string, signal?: AbortSignal, iconColor?: number): Promise<number | undefined> {
-	const tm = state.topicManager;
+async function registerSession(sessionId: string, sessionName: string, signal?: AbortSignal, iconColor?: number): Promise<number | undefined> {
 	const api = state.api;
-	if (!tm || !api) return undefined;
+	const chatId = getActiveChatId();
+	if (!api || !chatId) return undefined;
 
-	const threadId = await tm.createTopic(sessionId, sessionName, signal, iconColor);
-	if (threadId !== undefined) {
-		const handle = state.registry.get(sessionId);
-		if (handle) {
-			const outgoing = new OutgoingHandler(api);
-			const chatId = getActiveChatId();
-			if (chatId) outgoing.setActiveChatId(chatId);
-			outgoing.setThreadId(threadId);
-			handle.outgoing = outgoing;
-		}
-		state.registry.setThread(sessionId, threadId, sessionName);
+	const result = await createForumTopic(api, chatId, sessionName, signal, iconColor);
+	if (!result) return undefined;
+	if (result.topicsShouldDisable) {
+		state.topicsEnabled = false;
+		return undefined;
 	}
+
+	const threadId = result.threadId;
+	const handle = state.registry.get(sessionId);
+	if (handle) {
+		const outgoing = new OutgoingHandler(api);
+		outgoing.setActiveChatId(chatId);
+		outgoing.setThreadId(threadId);
+		handle.outgoing = outgoing;
+	}
+	state.registry.setThread(sessionId, threadId, sessionName);
 	return threadId;
 }
 
 /** Restore a session's existing forum topic (e.g., on reload/resume).
- *  Reopens the topic and configures the session handle's outgoing handler.
+ *  Reopens the topic and configures the outgoing handler.
  *  Returns the thread ID, or undefined if topics are disabled. */
-export async function restoreSession(sessionId: string, threadId: number, name: string, signal?: AbortSignal): Promise<number | undefined> {
-	const tm = state.topicManager;
+async function restoreSession(sessionId: string, threadId: number, name: string, signal?: AbortSignal): Promise<number | undefined> {
 	const api = state.api;
-	if (!tm || !api) return undefined;
+	const chatId = getActiveChatId();
+	if (!api || !chatId) return undefined;
 
-	const restoredThreadId = await tm.restoreSession(sessionId, threadId, name, signal);
-	if (restoredThreadId !== undefined) {
-		const handle = state.registry.get(sessionId);
-		if (handle) {
-			const outgoing = new OutgoingHandler(api);
-			const chatId = getActiveChatId();
-			if (chatId) outgoing.setActiveChatId(chatId);
-			outgoing.setThreadId(restoredThreadId);
-			handle.outgoing = outgoing;
-		}
-		state.registry.setThread(sessionId, restoredThreadId, name);
+	const shouldDisable = await reopenForumTopic(api, chatId, threadId, signal);
+	if (shouldDisable) {
+		state.topicsEnabled = false;
+		// Topic is still registered even if reopen failed - messages may still work
 	}
-	return restoredThreadId;
+
+	const handle = state.registry.get(sessionId);
+	if (handle) {
+		const outgoing = new OutgoingHandler(api);
+		outgoing.setActiveChatId(chatId);
+		outgoing.setThreadId(threadId);
+		handle.outgoing = outgoing;
+	}
+	state.registry.setThread(sessionId, threadId, name);
+	return threadId;
 }
 
 /** Unregister a session - close its forum topic.
  *  Session handle is removed from registry by the caller (index.ts session_shutdown). */
-export async function unregisterSession(sessionId: string, signal?: AbortSignal): Promise<void> {
-	const tm = state.topicManager;
-	if (tm) {
-		await tm.closeTopic(sessionId, signal);
-	}
-}
+async function unregisterSession(sessionId: string, threadId: number | undefined, signal?: AbortSignal): Promise<void> {
+	const api = state.api;
+	const chatId = getActiveChatId();
+	if (!api || !chatId || threadId === undefined) return;
 
-// ── Topics Control ──────────────────────────────────────────────────────────
-
-/** Enable or disable forum topic support.
- *  If chatId is provided and no activeChatId is set, uses the provided chatId.
- *  This is needed because topics can be created before the first message arrives
- *  (e.g., at session_start when we already know the paired user's chat ID). */
-export function setTopicsEnabled(enabled: boolean, chatId?: number): void {
-	if (!state.api) return;
-	if (enabled) {
-		const effectiveChatId = state.activeChatId ?? chatId;
-		if (effectiveChatId && !state.topicManager) {
-			state.topicManager = new TopicManager(state.api, effectiveChatId);
-			state.topicManager.setTopicsEnabled(true);
-		} else if (state.topicManager) {
-			state.topicManager.setTopicsEnabled(true);
-		}
-	} else {
-		state.topicManager = undefined;
-	}
+	await closeForumTopic(api, chatId, threadId, signal);
 }
 
 // ── Session Topic Setup ──────────────────────────────────────────────────────
@@ -150,9 +136,10 @@ export function setTopicsEnabled(enabled: boolean, chatId?: number): void {
  *  - Subscribes to the thread via relay client if applicable. */
 export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionStartReason): Promise<TopicSetupResult> {
 	const sess = currentSession();
-	const tm = state.topicManager;
-	log.debug({ hasSession: !!sess, hasTm: !!tm, allowedUserId: state.config.allowedUserId, reason }, "setupSessionTopic");
-	if (!sess || !tm || !state.config.allowedUserId) return { action: "skipped" };
+	const api = state.api;
+	const chatId = getActiveChatId();
+	log.debug({ hasSession: !!sess, hasApi: !!api, chatId, allowedUserId: state.config.allowedUserId, reason }, "setupSessionTopic");
+	if (!sess || !api || !chatId || !state.config.allowedUserId) return { action: "skipped" };
 
 	const label = cwdBasename();
 	log.debug({ sessionId: sess.sessionId.slice(0, 8), label, topicsEnabled: state.topicsEnabled, topicRenamed: sess.topicRenamed }, "setupSessionTopic: init");
@@ -192,7 +179,7 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 			created = true;
 		}
 		// Hide the General topic - it's confusing when sessions have dedicated topics
-		await tm.hideGeneralTopic();
+		await hideGeneralTopic(api, chatId);
 
 		if (created) {
 			return { action: "created", topicName: label };
@@ -216,47 +203,43 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 }
 
 /** Rename the session's topic on first user message.
- *  Format: "basename \u00B7 snippet". Only renames once (flag in SessionHandle).
+ *  Format: "basename · snippet". Only renames once (flag in SessionHandle).
  *  Skipped if topic was already renamed in a previous session (resumed). */
 export async function renameTopicFromMessage(text: string): Promise<void> {
 	const sess = currentSession();
-	const tm = state.topicManager;
-	log.debug({ hasSession: !!sess, topicRenamed: sess?.topicRenamed, hasTm: !!tm }, "renameTopicFromMessage");
-	if (!sess || sess.topicRenamed || !tm) {
-		return;
-	}
+	const api = state.api;
+	const chatId = getActiveChatId();
+	log.debug({ hasSession: !!sess, topicRenamed: sess?.topicRenamed, hasApi: !!api, chatId }, "renameTopicFromMessage");
+	if (!sess || sess.topicRenamed || !api || !chatId) return;
+
+	const threadId = sess.threadId;
+	if (threadId === undefined) return;
 
 	const name = topicNameFromMessage(text);
-	log.debug({ sessionId: sess.sessionId.slice(0, 8), name }, "renameTopicFromMessage: renaming");
+	log.debug({ sessionId: sess.sessionId.slice(0, 8), threadId, name }, "renameTopicFromMessage: renaming");
 	sess.topicRenamed = true;
 
-	await tm.renameTopic(sess.sessionId, name);
+	await renameForumTopic(api, chatId, threadId, name);
 	log.debug("renameTopicFromMessage: done");
 
-	const topic = tm.getSessionTopic(sess.sessionId);
-	log.debug({ threadId: topic?.threadId, name: topic?.name }, "renameTopicFromMessage: after rename");
-	if (topic) {
-		await saveSessionFields(sess.sessionFile, { connected: true, threadId: topic.threadId, topicName: name });
-		log.debug({ topicName: name }, "renameTopicFromMessage: saved");
-	}
+	// Update the topic name in the registry and session data
+	sess.topicName = name;
+	await saveSessionFields(sess.sessionFile, { connected: true, threadId, topicName: name });
+	log.debug({ topicName: name }, "renameTopicFromMessage: saved");
 }
 
 /** Tear down the current session's Telegram state.
  *  Closes the forum topic, unsubscribes from relay, and removes session from the map.
  *  Called from session_shutdown - only polling stops on "quit" (handled by caller). */
 export async function teardownSession(sessionId: string): Promise<void> {
-	const tm = state.topicManager;
-	if (!tm) return;
+	const handle = state.registry.get(sessionId);
+	const threadId = handle?.threadId;
 
 	// Unsubscribe from relay (local or client)
-	const topic = tm.getSessionTopic(sessionId);
-	if (topic?.threadId) {
-		unsubscribeThread(topic.threadId);
+	if (threadId !== undefined) {
+		unsubscribeThread(threadId);
 	}
 
-	// Close the forum topic and remove from session map
-	await unregisterSession(sessionId);
-
-	// Note: session state is already removed from the sessions map by the caller
-	// (index.ts session_shutdown handler calls removeSession before teardownSession)
+	// Close the forum topic
+	await unregisterSession(sessionId, threadId);
 }

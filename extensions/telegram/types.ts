@@ -424,3 +424,30 @@ export interface TelegramConfig {
 	 *  null = explicitly disabled; absent = not configured (same effect: placeholder message). */
 	media?: Partial<Record<MediaType, MediaProcessor | null>>;
 }
+
+// ── Extension Types ───────────────────────────────────────────────────────────
+// Types used across multiple modules but not tied to any single one.
+
+/** Handler for a Telegram callback query. Return true to consume, false to pass. */
+export type CallbackHandler = (query: CallbackQuery, api: import("./api.js").TelegramApi) => Promise<boolean>;
+
+/** Context about the Telegram message that triggered the current turn.
+ *  Set by incoming handler, consumed by before_agent_start to inject system prompt,
+ *  cleared after injection so it doesn't leak into non-Telegram turns. */
+export interface TelegramTurnContext {
+	/** Telegram username (without @) of the sender, if available. */
+	username: string | undefined;
+	/** Content types present in the message. */
+	types: import("./formatting.js").ContentType[];
+	/** Media types that had no processor configured - raw file only, no transcription/description. */
+	unprocessed: MediaType[];
+}
+
+/** An unknown user who messaged the bot and is awaiting auth decision. */
+export interface PendingUser {
+	userId: number;
+	userName: string;
+	chatId: number;
+	/** ISO timestamp of first message. */
+	timestamp: string;
+}

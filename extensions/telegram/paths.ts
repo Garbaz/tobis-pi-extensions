@@ -13,7 +13,7 @@
 // If a user overrides the agent dir, all telegram files follow automatically.
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 
@@ -64,12 +64,4 @@ export const CONFIG_DIR = join(AGENT_DIR, "extensions", "pi-tobis-extensions");
 export const CONFIG_PATH = join(CONFIG_DIR, "telegram.json");
 
 // ── Legacy Paths ─────────────────────────────────────────────────────────────
-// Used only for migration from old locations.
-
-/** Pi home directory (~/.pi/) — used only for legacy migration. */
-export const PI_HOME = dirname(AGENT_DIR);
-
-/** Legacy state path (pre-relay, in /tmp). Used for migration. */
-export const OLD_STATE_PATH: string | undefined = undefined;
-// Migration from /tmp is no longer needed after this long — set to undefined.
-// The migration code in config.ts handles OLD_STATE_PATH being undefined.
+// No legacy paths remain. Migration from /tmp was removed after sufficient time.

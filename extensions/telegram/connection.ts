@@ -15,7 +15,7 @@ import { handleIncomingUpdate, setAcceptCallback } from "./incoming.js";
 import { createLogger, flushLogs } from "./log.js";
 const log = createLogger("lifecycle");
 import { state, updateStatus, notify, currentSession, safeCtx, lockToChat, unlockChat, setSubscriptionCallbacks, clearSubscriptionCallbacks, notifyError, notifyWarn } from "./state.js";
-import { setupSessionTopic, setTopicsEnabled } from "./session.js";
+import { setupSessionTopic } from "./session.js";
 import { saveSessionFields } from "./topics.js";
 
 // ── Accept Callback ──────────────────────────────────────────────────────────
@@ -33,10 +33,8 @@ async function onAccept(userId: number, userName: string): Promise<void> {
 	}
 	// Remove from pending if present
 	state.pendingUsers.delete(userId);
-	// Now that we know the chat ID, enable topics if supported
-	if (state.topicsEnabled && state.config.allowedUserId) {
-		setTopicsEnabled(true, state.config.allowedUserId);
-	}
+	// Topics are already enabled if the bot supports them (set during connect)
+	// No additional action needed here - the flag was set in connect()
 	notify(`Telegram: paired with ${userName} (${userId})`, "info");
 	updateStatus();
 	// Set up topic for the current session after pairing
@@ -97,10 +95,9 @@ export async function connect(ctx: ExtensionCommandContext | ExtensionContext): 
 	const { subscribe, unsubscribe } = createSubscriptionCallbacks();
 	setSubscriptionCallbacks(subscribe, unsubscribe);
 
-	// Pre-create the topic manager if we already know the chat ID (from a paired user)
-	if (state.topicsEnabled && state.config.allowedUserId) {
-		setTopicsEnabled(true, state.config.allowedUserId);
-	}
+	// Pre-enable topics if the bot supports them and we have a paired user
+	// (Topics flag is set during connect() from getMe().has_topics_enabled)
+	// No TopicManager to create - topics API helpers are called directly with state.api
 
 	// Lock to the paired user's chat immediately if we know the ID.
 	// Without this, TUI-originated turns have no activeChatId and outgoing
@@ -145,7 +142,6 @@ export async function disconnect(ctx: ExtensionCommandContext | ExtensionContext
 	clearSubscriptionCallbacks();
 	// Clear runtime state - after disconnect, API is stale
 	state.api = undefined;
-	state.topicManager = undefined;
 	state.polling = undefined;
 	state.botUsername = undefined;
 	state.topicsEnabled = false;
@@ -181,7 +177,6 @@ export async function shutdown(): Promise<void> {
 	clearSubscriptionCallbacks();
 	// Clear runtime state
 	state.api = undefined;
-	state.topicManager = undefined;
 	state.polling = undefined;
 	state.botUsername = undefined;
 	// Persist polling cursor so we resume cleanly

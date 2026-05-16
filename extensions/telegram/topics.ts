@@ -1,33 +1,24 @@
-// ── Forum Topic Manager ───────────────────────────────────────────────────────
-// Manages the mapping between Pi sessions and Telegram forum topics.
-// When topics are enabled (Bot API 9.4+ private chat topics), each session
-// gets its own topic for organized multi-session routing.
-
-import type { TelegramApi } from "./api.js";
-import type { ForumTopic } from "./types.js";
-import { createLogger } from "./log.js";
-import { notifyWarn } from "./state.js";
-const log = createLogger("topic");
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
-
-// ── Session Persistence ─────────────────────────────────────────────────────
-// Persists session telegram state as a companion file next to pi's session
-// .jsonl. This ensures each pi instance (even in the same CWD) gets its own
-// file, keyed by the session file basename rather than the shared sessionDir.
+// ── Session Data Persistence ─────────────────────────────────────────────────
+// Persists per-session telegram state as a companion file next to pi's
+// session .jsonl. Uses read-merge-write to avoid clobbering.
 //
 // Pi's session layout:
 //   ~/.pi/agent/sessions/--<cwd-encoded>--/
 //     2026-05-15T16-00-15-694Z_019e2c5d-....jsonl   (pi's session file)
 //     2026-05-15T16-00-15-694Z_019e2c5d-....-telegram.json  (our companion)
 //
-// The `connected` field is the explicit sentinel — true when connected,
+// The `connected` field is the explicit sentinel -- true when connected,
 // false or absent after disconnect. threadId/topicName are kept across
 // disconnects so reconnecting can resume the same topic.
 
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+
+// ── Session Data ─────────────────────────────────────────────────────────────
+
 export interface TelegramSessionData {
 	/** Whether this session is currently connected to Telegram.
-	 *  true = auto-reconnect on resume/reload. false = explicitly disconnected. */
+	 *  true = auto-reconnect on resume/reload. false or explicitly disconnected. */
 	connected?: boolean;
 	/** Forum topic thread ID (present if topics are enabled). */
 	threadId?: number;
@@ -36,7 +27,7 @@ export interface TelegramSessionData {
 }
 
 /** Derive the per-session telegram data file path from the session file path.
- *  E.g. ".../<timestamp>_<sessionId>.jsonl" → ".../<timestamp>_<sessionId>-telegram.json"
+ *  E.g. ".../<timestamp>_<sessionId>.jsonl" -> ".../<timestamp>_<sessionId>-telegram.json"
  *  Returns undefined if sessionFile is undefined (in-memory session). */
 export function sessionDataPath(sessionFile: string | undefined): string | undefined {
 	if (!sessionFile) return undefined;
@@ -56,7 +47,7 @@ export async function readSessionData(sessionFile: string | undefined): Promise<
 	}
 }
 
-/** Write full session data (overwrites the file). Internal only - never export.
+/** Write full session data (overwrites the file). Internal only -- never export.
  *  All external callers must use saveSessionFields to avoid clobbering. */
 async function writeSessionData(filePath: string, data: TelegramSessionData): Promise<void> {
 	await mkdir(join(filePath, ".."), { recursive: true });
@@ -73,236 +64,126 @@ export async function saveSessionFields(sessionFile: string | undefined, fields:
 	await writeSessionData(filePath, existing);
 }
 
-export interface SessionTopic {
-	/** The Telegram message_thread_id for this session's topic. */
-	threadId: number;
-	/** The human-readable topic name (typically the session label or CWD basename). */
-	name: string;
-	/** Whether the topic is currently open (false = closed). */
-	isOpen: boolean;
-}
+// ── Topic API Helpers ─────────────────────────────────────────────────────────
+// Pure functions that call the Telegram Bot API topic methods.
+// No internal state -- all mapping is in SessionRegistry, all config is in state.
+// Return a result type so the caller can decide how to update state
+// (e.g. disable topics on "not a supergroup forum" error).
 
-/** Check if a Telegram API error is "not a supergroup forum" - meaning
- *  the chat doesn't support forum topics. This is expected in private chats
- *  or non-forum groups and should be handled silently. */
-function isNotSupergroupForum(err: unknown): boolean {
+import type { TelegramApi } from "./api.js";
+import type { ForumTopic } from "./types.js";
+import { createLogger } from "./log.js";
+import { notifyWarn } from "./state.js";
+const log = createLogger("topic");
+
+/** Check if a Telegram API error means "not a supergroup forum" --
+ *  the chat doesn't support forum topics. Expected in private chats. */
+export function isNotSupergroupForum(err: unknown): boolean {
 	const msg = err instanceof Error ? err.message : String(err);
 	return msg.includes("not a supergroup forum");
 }
 
-// ── Topic Manager ────────────────────────────────────────────────────────────
+/** Create a forum topic. Returns the thread ID, or undefined on failure.
+ *  If the error is "not a supergroup forum", sets topicsShouldDisable=true
+ *  so the caller can update state.topicsEnabled. */
+export async function createForumTopic(
+	api: TelegramApi,
+	chatId: number,
+	name: string,
+	signal?: AbortSignal,
+	iconColor?: number,
+): Promise<{ threadId: number; topicsShouldDisable: boolean } | undefined> {
+	const topicName = name.slice(0, 128);
+	log.debug({ topicName, chatId }, "createForumTopic");
 
-export class TopicManager {
-	private api: TelegramApi;
-	private chatId: number;
-
-	/** sessionId → SessionTopic */
-	private sessions = new Map<string, SessionTopic>();
-
-	/** threadId → sessionId (reverse lookup for incoming message routing) */
-	private threadToSession = new Map<number, string>();
-
-	/** Whether the bot has forum topics enabled in private chats. */
-	private topicsEnabled = false;
-
-	constructor(api: TelegramApi, chatId: number) {
-		this.api = api;
-		this.chatId = chatId;
-	}
-
-	/** Set whether topics are available (from getMe().has_topics_enabled). */
-	setTopicsEnabled(enabled: boolean): void {
-		this.topicsEnabled = enabled;
-	}
-
-	/** Whether topics are available for use. */
-	isTopicsEnabled(): boolean {
-		return this.topicsEnabled;
-	}
-
-	/** Create a forum topic for a session. Returns the thread ID, or undefined if topics are disabled. */
-	async createTopic(sessionId: string, name: string, signal?: AbortSignal, iconColor?: number): Promise<number | undefined> {
-		if (!this.topicsEnabled) return undefined;
-
-		// Truncate name to 128 chars (Telegram limit)
-		const topicName = name.slice(0, 128);
-		log.debug({ sessionId: sessionId.slice(0, 8), topicName, chatId: this.chatId }, "createTopic");
-
-		try {
-			const topic: ForumTopic = await this.api.createForumTopic({
-				chat_id: this.chatId,
-				name: topicName,
-				icon_color: iconColor,
-			}, signal);
-
-			this.sessions.set(sessionId, {
-				threadId: topic.message_thread_id,
-				name: topicName,
-				isOpen: true,
-			});
-			this.threadToSession.set(topic.message_thread_id, sessionId);
-			log.debug({ threadId: topic.message_thread_id }, "createTopic: created");
-
-			return topic.message_thread_id;
-		} catch (err) {
-			if (isNotSupergroupForum(err)) {
-				// Chat doesn't support forum topics - disable and fall back
-				this.topicsEnabled = false;
-				return undefined;
-			}
-			const msg = err instanceof Error ? err.message : String(err);
-			notifyWarn(`Failed to create forum topic "${topicName}": ${msg}`);
-			return undefined;
+	try {
+		const topic: ForumTopic = await api.createForumTopic({
+			chat_id: chatId,
+			name: topicName,
+			icon_color: iconColor,
+		}, signal);
+		log.debug({ threadId: topic.message_thread_id }, "createForumTopic: created");
+		return { threadId: topic.message_thread_id, topicsShouldDisable: false };
+	} catch (err) {
+		if (isNotSupergroupForum(err)) {
+			return { threadId: 0, topicsShouldDisable: true };
 		}
+		const msg = err instanceof Error ? err.message : String(err);
+		notifyWarn(`Failed to create forum topic "${topicName}": ${msg}`);
+		return undefined;
 	}
+}
 
-	/** Restore a previously created topic for a session (e.g., on reload/resume).
-	 *  Reopens the topic if it was closed, and re-registers it in the mapping.
-	 *  Returns the thread ID, or undefined if topics are disabled. */
-	async restoreSession(sessionId: string, threadId: number, name: string, signal?: AbortSignal): Promise<number | undefined> {
-		if (!this.topicsEnabled) return undefined;
+/** Reopen a previously closed forum topic.
+ *  Returns true if topics should be disabled (not a supergroup forum). */
+export async function reopenForumTopic(
+	api: TelegramApi,
+	chatId: number,
+	threadId: number,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	try {
+		await api.reopenForumTopic(chatId, threadId, signal);
+		return false;
+	} catch (err) {
+		return isNotSupergroupForum(err);
+	}
+}
 
-		this.sessions.set(sessionId, {
-			threadId,
-			name,
-			isOpen: false, // will be reopened below
-		});
-		this.threadToSession.set(threadId, sessionId);
+/** Close a forum topic. Logs a warning on unexpected errors. */
+export async function closeForumTopic(
+	api: TelegramApi,
+	chatId: number,
+	threadId: number,
+	signal?: AbortSignal,
+): Promise<void> {
+	try {
+		await api.closeForumTopic(chatId, threadId, signal);
+	} catch (err) {
+		if (isNotSupergroupForum(err)) return;
+		const msg = err instanceof Error ? err.message : String(err);
+		notifyWarn(`Failed to close forum topic: ${msg}`);
+	}
+}
 
-		// Reopen the topic (it was closed on session_shutdown)
-		try {
-			await this.api.reopenForumTopic(this.chatId, threadId, signal);
-			const session = this.sessions.get(sessionId);
-			if (session) session.isOpen = true;
-		} catch (err) {
-			if (isNotSupergroupForum(err)) {
-				// Chat doesn't support forum topics - disable and continue without topics
-				this.topicsEnabled = false;
-			}
-			// Topic is still registered even if reopen failed - messages may still work
+/** Rename a forum topic. Logs a warning on unexpected errors. */
+export async function renameForumTopic(
+	api: TelegramApi,
+	chatId: number,
+	threadId: number,
+	name: string,
+	signal?: AbortSignal,
+): Promise<void> {
+	const topicName = name.slice(0, 128);
+	log.debug({ chatId, threadId, name: topicName }, "renameForumTopic");
+
+	try {
+		await api.editForumTopic({
+			chat_id: chatId,
+			message_thread_id: threadId,
+			name: topicName,
+		}, signal);
+		log.debug("renameForumTopic: succeeded");
+	} catch (err) {
+		log.debug({ err: err instanceof Error ? err.message : String(err) }, "renameForumTopic: FAILED");
+		if (isNotSupergroupForum(err)) {
+			notifyWarn(`editForumTopic returned "not a supergroup forum" - private chat topics may not support rename`);
+			return;
 		}
-
-		return threadId;
+		const msg = err instanceof Error ? err.message : String(err);
+		notifyWarn(`Failed to rename forum topic to "${topicName}": ${msg}`);
 	}
+}
 
-	/** Close a session's topic (marks it as inactive in Telegram). */
-	async closeTopic(sessionId: string, signal?: AbortSignal): Promise<void> {
-		const session = this.sessions.get(sessionId);
-		if (!session || !session.isOpen) return;
-
-		try {
-			await this.api.closeForumTopic(this.chatId, session.threadId, signal);
-			session.isOpen = false;
-		} catch (err) {
-			if (isNotSupergroupForum(err)) return; // expected in non-forum chats
-			const msg = err instanceof Error ? err.message : String(err);
-			notifyWarn(`Failed to close forum topic "${session.name}": ${msg}`);
-		}
-	}
-
-	/** Reopen a session's topic. */
-	async reopenTopic(sessionId: string, signal?: AbortSignal): Promise<void> {
-		const session = this.sessions.get(sessionId);
-		if (!session || session.isOpen) return;
-
-		try {
-			await this.api.reopenForumTopic(this.chatId, session.threadId, signal);
-			session.isOpen = true;
-		} catch (err) {
-			if (isNotSupergroupForum(err)) return; // expected in non-forum chats
-			const msg = err instanceof Error ? err.message : String(err);
-			notifyWarn(`Failed to reopen forum topic "${session.name}": ${msg}`);
-		}
-	}
-
-	/** Delete a session's topic and all its messages. Use with caution. */
-	async deleteTopic(sessionId: string, signal?: AbortSignal): Promise<void> {
-		const session = this.sessions.get(sessionId);
-		if (!session) return;
-
-		try {
-			await this.api.deleteForumTopic(this.chatId, session.threadId, signal);
-		} catch (err) {
-			if (isNotSupergroupForum(err)) return; // expected in non-forum chats
-			const msg = err instanceof Error ? err.message : String(err);
-			notifyWarn(`Failed to delete forum topic "${session.name}": ${msg}`);
-		}
-
-		this.threadToSession.delete(session.threadId);
-		this.sessions.delete(sessionId);
-	}
-
-	/** Update a session's topic name. */
-	async renameTopic(sessionId: string, name: string, signal?: AbortSignal): Promise<void> {
-		const session = this.sessions.get(sessionId);
-		log.debug({ sessionId: sessionId.slice(0, 8), threadId: session?.threadId, name: session?.name, newName: name }, "renameTopic");
-		if (!session) return;
-
-		const topicName = name.slice(0, 128);
-
-		try {
-			log.debug({ chatId: this.chatId, threadId: session.threadId, name: topicName }, "renameTopic: calling editForumTopic");
-			await this.api.editForumTopic({
-				chat_id: this.chatId,
-				message_thread_id: session.threadId,
-				name: topicName,
-			}, signal);
-			log.debug("renameTopic: succeeded");
-			session.name = topicName;
-		} catch (err) {
-			log.debug({ err: err instanceof Error ? err.message : String(err) }, "renameTopic: FAILED");
-			if (isNotSupergroupForum(err)) {
-				notifyWarn(`editForumTopic returned "not a supergroup forum" - private chat topics may not support rename`);
-				return;
-			}
-			const msg = err instanceof Error ? err.message : String(err);
-			notifyWarn(`Failed to rename forum topic to "${topicName}": ${msg}`);
-		}
-	}
-
-	/** Get the thread ID for a session, or undefined if no topic exists. */
-	getThreadId(sessionId: string): number | undefined {
-		return this.sessions.get(sessionId)?.threadId;
-	}
-
-	/** Look up which session owns a thread. Returns undefined for General topic or unknown threads. */
-	getSessionByThread(threadId: number | undefined): string | undefined {
-		if (threadId === undefined) return undefined;
-		return this.threadToSession.get(threadId);
-	}
-
-	/** Get the SessionTopic info for a session. */
-	getSessionTopic(sessionId: string): SessionTopic | undefined {
-		return this.sessions.get(sessionId);
-	}
-
-	/** Remove a session from the mapping (without deleting the Telegram topic). */
-	removeSession(sessionId: string): void {
-		const session = this.sessions.get(sessionId);
-		if (session) {
-			this.threadToSession.delete(session.threadId);
-			this.sessions.delete(sessionId);
-		}
-	}
-
-	/** Number of active session-topic mappings. */
-	get size(): number {
-		return this.sessions.size;
-	}
-
-	/** Update the chat ID (e.g., when locking to a new chat). */
-	setChatId(chatId: number): void {
-		this.chatId = chatId;
-	}
-
-	/** Hide the General topic. Only works in supergroup forums. No-op if topics are disabled. */
-	async hideGeneralTopic(signal?: AbortSignal): Promise<void> {
-		if (!this.topicsEnabled) return;
-		try {
-			await this.api.hideGeneralForumTopic(this.chatId, signal);
-		} catch {
-			// Not supported in private chats (400: "the chat is not a supergroup forum")
-			// This is expected - silently ignore
-		}
+/** Hide the General topic. Only works in supergroup forums. No-op on error. */
+export async function hideGeneralTopic(
+	api: TelegramApi,
+	chatId: number,
+	signal?: AbortSignal,
+): Promise<void> {
+	try {
+		await api.hideGeneralForumTopic(chatId, signal);
+	} catch {
+		// Not supported in private chats - silently ignore
 	}
 }
