@@ -56,23 +56,30 @@ Before working on extension code or Telegram API calls, read the relevant refere
 
 ## Unit tests
 
-Tests verify **architectural decisions**, not code behavior. Every test must map to a specific design choice that could subtly break during refactoring.
+Tests verify **architectural decisions from ARCHITECTURE.md**, not code behavior. Every test must map to a specific design choice documented in the architecture, not to an implementation detail the coder happened to write.
+
+**Derive tests from ARCHITECTURE.md, not from code.** Read the architecture decisions first, identify testable invariants, then write tests that verify them. If a test can't cite an architecture decision, it doesn't belong.
 
 **Write tests for:**
 - Invariants that cross module boundaries (routing, session lifecycle, persistence format)
-- Edge cases where the obvious behavior is wrong (e.g. General topic has no session owner, orphaned relay messages must be processed)
+- Edge cases where the obvious behavior is wrong (e.g. General topic has no session owner, orphaned relay messages must be processed locally)
 - Merge/overwrite semantics that could cause data loss (e.g. `saveSessionFields` must merge, not clobber)
-- Fallback behaviors that prevent silent failures (e.g. `currentSession` must never return a stale handle)
+- Auth priority rules (e.g. blacklist takes priority over whitelist)
+- Config/state separation (e.g. runtime fields stripped from config on save)
+- Cross-talk prevention (e.g. per-session paths derived from .jsonl basename, not shared sessionDir)
 
 **Don't write tests for:**
 - Trivial Map/setter/getter behavior ("size starts at 0", "get returns undefined for unknown key")
-- Pure formatting functions (truncate, shortenPath, summarizeToolInput)
+- Pure formatting functions (truncate, shortenPath, summarizeToolInput, extFromMime, mediaPlaceholder)
 - Code you're about to refactor anyway
 - Things already guaranteed by the type system
+- Code behavior that happens to be true but isn't an architecture decision (e.g. how a formatter stringifies a contact)
+- Integration tests against real APIs (those go in `test-media-integration.ts`, not the unit suite)
 
-Each test's comment must state **which architectural decision** it verifies and **what would break** if the invariant changed. If you can't articulate that, the test doesn't belong.
+Each test's comment must state **which architecture decision (D1, D2, etc.)** it verifies and **what would break** if the invariant changed. If you can't articulate that, the test doesn't belong.
 
 Runner: `npx tsx --test` (via `npm test`). Files: `extensions/telegram/test-*.ts`.
+Integration tests (real API calls): `extensions/telegram/test-media-integration.ts` (run separately via `npm run test:integration`).
 
 ## Logging
 
