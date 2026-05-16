@@ -5,7 +5,7 @@
 
 import type { TelegramApi } from "./api.js";
 import type { ForumTopic } from "./types.js";
-import { notifyWarn } from "./log.js";
+import { notifyWarn, debugLog } from "./log.js";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -104,6 +104,7 @@ export class TopicManager {
 
 		// Truncate name to 128 chars (Telegram limit)
 		const topicName = name.slice(0, 128);
+		debugLog(`TopicManager.createTopic: sessionId=${sessionId.slice(0, 8)} name="${topicName}" chatId=${this.chatId}`);
 
 		try {
 			const topic: ForumTopic = await this.api.createForumTopic({
@@ -118,6 +119,7 @@ export class TopicManager {
 				isOpen: true,
 			});
 			this.threadToSession.set(topic.message_thread_id, sessionId);
+			debugLog(`TopicManager.createTopic: created threadId=${topic.message_thread_id} for session ${sessionId.slice(0, 8)}`);
 
 			return topic.message_thread_id;
 		} catch (err) {
@@ -211,18 +213,22 @@ export class TopicManager {
 	/** Update a session's topic name. */
 	async renameTopic(sessionId: string, name: string, signal?: AbortSignal): Promise<void> {
 		const session = this.sessions.get(sessionId);
+		debugLog(`TopicManager.renameTopic: sessionId=${sessionId.slice(0, 8)} session=${session ? `threadId=${session.threadId} name="${session.name}"` : "NOT FOUND"} newName="${name}"`);
 		if (!session) return;
 
 		const topicName = name.slice(0, 128);
 
 		try {
+			debugLog(`TopicManager.renameTopic: calling editForumTopic(chat_id=${this.chatId}, thread_id=${session.threadId}, name="${topicName}")`);
 			await this.api.editForumTopic({
 				chat_id: this.chatId,
 				message_thread_id: session.threadId,
 				name: topicName,
 			}, signal);
+			debugLog(`TopicManager.renameTopic: editForumTopic succeeded`);
 			session.name = topicName;
 		} catch (err) {
+			debugLog(`TopicManager.renameTopic: editForumTopic FAILED: ${err instanceof Error ? err.message : String(err)}`);
 			if (isNotSupergroupForum(err)) {
 				notifyWarn(`editForumTopic returned "not a supergroup forum" - private chat topics may not support rename`);
 				return;

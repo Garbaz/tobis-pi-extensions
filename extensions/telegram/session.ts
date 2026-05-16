@@ -6,6 +6,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readSessionData, saveSessionFields } from "./topics.js";
 import { state, currentSession, activateSession, notify } from "./state.js";
+import { debugLog } from "./log.js";
 
 // ── Topic Icon Colors ─────────────────────────────────────────────────────────
 // The 6 allowed icon colors for forum topics (from Bot API docs).
@@ -23,7 +24,9 @@ const TOPIC_ICON_COLORS = [
 /** Derive a topic name from the CWD basename. */
 function cwdBasename(): string {
 	const cwd = process.cwd();
-	return cwd.split("/").pop() || "session";
+	const name = cwd.split("/").pop() || "session";
+	debugLog(`cwdBasename: cwd="${cwd}" -> "${name}"`);
+	return name;
 }
 
 /** Derive a topic name from CWD + first message snippet.
@@ -33,6 +36,7 @@ export function topicNameFromMessage(text: string): string {
 	// Take first line, strip leading / commands, trim whitespace
 	const firstLine = text.split("\n")[0]?.trim() || "";
 	const snippet = firstLine.replace(/^\/\S+\s*/, "").slice(0, 60).trim();
+	debugLog(`topicNameFromMessage: firstLine="${firstLine.slice(0, 80)}" snippet="${snippet.slice(0, 80)}"`);
 	if (!snippet) return basename;
 	const name = `${basename} \u00B7 ${snippet}`;
 	return name.slice(0, 128);
@@ -43,14 +47,6 @@ export function topicNameFromMessage(text: string): string {
 /** Why the session started. Matches Pi's SessionStartEvent.reason. */
 export type SessionStartReason = "startup" | "reload" | "new" | "resume" | "fork";
 
-/** Creates or resumes a forum topic for the current session.
- *  Called from session_start and /telegram connect.
- *
- *  - On "resume" or "reload": resumes the existing topic from session data.
- *  - On "new", "startup", or "fork": creates a fresh topic with CWD basename.
- *  - First incoming message renames the topic to "basename · snippet".
- *  - Writes session data so the session auto-connects on resume.
- *  - Subscribes to the thread via relay client if applicable. */
 /** Result of setting up a session topic. */
 export interface TopicSetupResult {
 	/** What happened during setup: "created", "resumed", or "skipped". */
@@ -59,19 +55,30 @@ export interface TopicSetupResult {
 	topicName?: string;
 }
 
+/** Creates or resumes a forum topic for the current session.
+ *  Called from session_start and /telegram connect.
+ *
+ *  - On "resume" or "reload": resumes the existing topic from session data.
+ *  - On "new", "startup", or "fork": creates a fresh topic with CWD basename.
+ *  - First incoming message renames the topic to "basename · snippet".
+ *  - Writes session data so the session auto-connects on resume.
+ *  - Subscribes to the thread via relay client if applicable. */
 export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionStartReason): Promise<TopicSetupResult> {
 	const sess = currentSession();
 	const bridge = state.bridge;
 	const tm = bridge?.getTopicManager();
+	debugLog(`setupSessionTopic: sess=${!!sess} bridge=${!!bridge} tm=${!!tm} allowedUserId=${state.config.allowedUserId} reason=${reason}`);
 	if (!sess || !bridge || !tm || !state.config.allowedUserId) return { action: "skipped" };
 
 	const label = cwdBasename();
+	debugLog(`setupSessionTopic: sessionId=${sess.sessionId.slice(0, 8)} label="${label}" topicsEnabled=${state.topicsEnabled} topicRenamed=${sess.topicRenamed}`);
 
 	// Only resume existing topic on resume/reload - never on new/startup/fork
 	const canResume = reason === "resume" || reason === "reload";
 
 	// Check for existing session data (resume vs create)
 	const sessionData = await readSessionData(sess.sessionDir);
+	debugLog(`setupSessionTopic: canResume=${canResume} sessionData=${sessionData ? JSON.stringify(sessionData) : "none"}`);
 	if (canResume && sessionData?.threadId) {
 		// Resume existing topic
 		const threadId = await bridge.restoreSession(
@@ -79,17 +86,21 @@ export async function setupSessionTopic(ctx: ExtensionContext, reason?: SessionS
 			sessionData.threadId,
 			sessionData.topicName ?? label,
 		);
+		debugLog(`setupSessionTopic: restoreSession returned threadId=${threadId}`);
 		if (threadId !== undefined) {
 			// If already renamed in a previous session, mark as renamed
 			if (sessionData.topicName && sessionData.topicName.includes("\u00B7")) {
 				sess.topicRenamed = true;
+				debugLog(`setupSessionTopic: topic already renamed (has middle dot), setting topicRenamed=true`);
 			}
 			return { action: "resumed", topicName: sessionData.topicName ?? label };
 		}
 	} else if (state.topicsEnabled) {
 		// Create the topic immediately so it's ready for messages.
 		const iconColor = TOPIC_ICON_COLORS[Math.floor(Math.random() * TOPIC_ICON_COLORS.length)];
+		debugLog(`setupSessionTopic: creating topic "${label}" for session ${sess.sessionId.slice(0, 8)}`);
 		const threadId = await bridge.registerSession(sess.sessionId, label, undefined, iconColor);
+		debugLog(`setupSessionTopic: registerSession returned threadId=${threadId}`);
 		let created = false;
 		if (threadId !== undefined) {
 			bridge.activateSession(sess.sessionId);
@@ -129,13 +140,14 @@ export async function ensureTopicCreated(): Promise<number | undefined> {
 	const sess = currentSession();
 	const bridge = state.bridge;
 	const tm = bridge?.getTopicManager();
-	if (!sess || !bridge || !tm) {
-		notify(`ensureTopicCreated: no session/bridge/tm - sess=${!!sess} bridge=${!!bridge} tm=${!!tm}`, "warning");
-		return undefined;
-	}
+	debugLog(`ensureTopicCreated: sess=${!!sess} bridge=${!!bridge} tm=${!!tm}`);
+	if (!sess || !bridge || !tm) return undefined;
+
+	debugLog(`ensureTopicCreated: guard passed, sessionId=${sess.sessionId.slice(0, 8)}`);
 
 	// Check if topic already exists
 	const existingTopic = tm.getSessionTopic(sess.sessionId);
+	debugLog(`ensureTopicCreated: sessionId=${sess.sessionId.slice(0, 8)} existingTopic=${existingTopic ? `threadId=${existingTopic.threadId} name="${existingTopic.name}"` : "none"}`);
 	if (existingTopic) {
 		return existingTopic.threadId;
 	}
@@ -143,8 +155,10 @@ export async function ensureTopicCreated(): Promise<number | undefined> {
 	// Topic doesn't exist yet - create it now (fallback)
 	const iconColor = TOPIC_ICON_COLORS[Math.floor(Math.random() * TOPIC_ICON_COLORS.length)];
 	const label = cwdBasename();
+	debugLog(`ensureTopicCreated: creating fallback topic "${label}" for session ${sess.sessionId.slice(0, 8)}`);
 
 	const threadId = await bridge.registerSession(sess.sessionId, label, undefined, iconColor);
+	debugLog(`ensureTopicCreated: registerSession returned threadId=${threadId}`);
 	if (threadId !== undefined) {
 		bridge.activateSession(sess.sessionId);
 		activateSession(sess.sessionId);
@@ -159,19 +173,25 @@ export async function ensureTopicCreated(): Promise<number | undefined> {
 export async function renameTopicFromMessage(text: string): Promise<void> {
 	const sess = currentSession();
 	const tm = state.bridge?.getTopicManager();
+	debugLog(`renameTopicFromMessage: sess=${!!sess} topicRenamed=${sess?.topicRenamed} tm=${!!tm} text="${text.slice(0, 60)}"`);
 	if (!sess || sess.topicRenamed || !tm) {
-		notify(`renameTopic: skip - sess=${!!sess} renamed=${sess?.topicRenamed} tm=${!!tm}`, "warning");
+		debugLog(`renameTopicFromMessage: EARLY RETURN - sess=${!!sess} topicRenamed=${sess?.topicRenamed} tm=${!!tm}`);
 		return;
 	}
 
 	const name = topicNameFromMessage(text);
-	notify(`renaming topic to "${name}"`, "info");
+	debugLog(`renameTopicFromMessage: sessionId=${sess.sessionId.slice(0, 8)} newName="${name}"`);
 	sess.topicRenamed = true;
 
+	debugLog(`renameTopicFromMessage: calling tm.renameTopic(sessionId=${sess.sessionId.slice(0, 8)}, name="${name}")`);
 	await tm.renameTopic(sess.sessionId, name);
+	debugLog(`renameTopicFromMessage: renameTopic returned`);
+
 	const topic = tm.getSessionTopic(sess.sessionId);
+	debugLog(`renameTopicFromMessage: after rename, topic=${topic ? `threadId=${topic.threadId} name="${topic.name}"` : "none"}`);
 	if (topic) {
 		await saveSessionFields(sess.sessionDir, { connected: true, threadId: topic.threadId, topicName: name });
+		debugLog(`renameTopicFromMessage: saved session data with topicName="${name}"`);
 	}
 }
 

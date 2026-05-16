@@ -14,7 +14,8 @@ import { formatIncomingText, extractText, formatLocation, formatVenue, formatCon
 import { getMediaDir, getMediaInfo, downloadMediaFile, processMedia, truncateProcessorOutput, mediaPlaceholder } from "./media.js";
 import { checkUserAuth } from "./config.js";
 import { state, currentSession, safeCtx, notify } from "./state.js";
-import { renameTopicFromMessage, ensureTopicCreated } from "./session.js";
+import { ensureTopicCreated } from "./session.js";
+import { debugLog } from "./log.js";
 import type { PendingUser } from "./state.js";
 
 // ── Incoming Context ─────────────────────────────────────────────────────────
@@ -83,6 +84,8 @@ async function handleMessage(
 	isEdit = false,
 ): Promise<IncomingResult | undefined> {
 	const { api, config, pi, activeChatId, lockToChat, onAccept } = deps;
+
+	debugLog(`handleMessage: from=${message.from?.id} text=${(message.text || message.caption || "").slice(0, 40)} thread_id=${message.message_thread_id}`);
 
 	// Skip forum topic service messages - they come from the bot itself,
 	// not the user, and carry no user content.
@@ -284,8 +287,8 @@ async function handleMessage(
 	// Ensure the forum topic exists (fallback in case it wasn't created on connect)
 	const threadId = await ensureTopicCreated();
 
-	// Rename topic from CWD basename to "basename \u00B7 snippet" on first user message
-	await renameTopicFromMessage(result.text);
+	// Note: topic rename is handled by the 'input' event in index.ts,
+	// which fires for both TUI and Telegram messages.
 
 	// Echo media processor output to the Telegram chat so the user can see
 	// what the bot understood from the photo/voice/etc.

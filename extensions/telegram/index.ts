@@ -61,7 +61,7 @@ import { readSessionData } from "./topics.js";
 import { state, isTelegramConnected, updateStatus, initSession, removeSession, activateSession, currentSession, refreshSessionCtx } from "./state.js";
 import { connect, disconnect, shutdown } from "./lifecycle.js";
 import { readConfig, updateConfig, saveConfigField, allowUser, blockUser, validateMediaConfig } from "./config.js";
-import { setupSessionTopic, teardownSession, type SessionStartReason } from "./session.js";
+import { setupSessionTopic, teardownSession, renameTopicFromMessage, type SessionStartReason } from "./session.js";
 import { buildTelegramPromptSuffix } from "./prompt.js";
 
 /** Get session ID from ctx, or return undefined if ctx is stale. */
@@ -450,12 +450,16 @@ export default function telegramExtension(extensionApi: ExtensionAPI): void {
 	});
 
 	// Echo TUI-originated user messages to Telegram
+	// + Rename topic on first message (works for both TUI and Telegram input)
 	extensionApi.on("input", (event: InputEvent, ctx: ExtensionContext) => {
 		const sessionId = getSessionId(ctx);
 		if (!sessionId) return;
 
 		// Refresh ctx in session map for long-lived callbacks
 		refreshSessionCtx(sessionId, ctx);
+
+		// Rename topic from CWD basename to "basename · snippet" on first user message
+		void renameTopicFromMessage(event.text).catch(() => {});
 
 		if (event.source === "interactive" && state.bridge?.getActiveChatId()) {
 			void state.bridge.sendUserEcho(event.text).catch(() => {});

@@ -12,6 +12,21 @@
 // prefer using ctx.ui.notify() directly - it's guaranteed to work.
 
 import { notify, updateStatus } from "./state.js";
+import { appendFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+const DEBUG_LOG = join(homedir(), ".pi", "run", "telegram", "debug.log");
+
+/** Write a debug line to the log file. Timestamped, one line per call. */
+export function debugLog(message: string): void {
+	try {
+		const ts = new Date().toISOString().slice(11, 23); // HH:mm:ss.SSS
+		appendFileSync(DEBUG_LOG, `${ts} ${message}\n`);
+	} catch {
+		// best-effort
+	}
+}
 
 /** Debug/info message - silently dropped. Use notify() or ctx.ui.notify for user-visible messages. */
 export function log(_message: string): void {
