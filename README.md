@@ -82,7 +82,7 @@ Once configured, run `/telegram setup` in Pi and paste your bot token.
 | Module | Lines | Purpose |
 |--------|------:|----------|
 | `outgoing.ts` | 656 | Response streaming, tool progress, TUI echo, reactions, typing |
-| `incoming.ts` | 453 | Message handling, auth, callback queries, bot commands |
+| `incoming.ts` | 473 | Message handling, auth, callback queries, bot commands |
 | `index.ts` | 452 | Extension factory (commands + events + tool/input hooks) |
 | `relay.ts` | 435 | Multi-instance relay server/client, PID-file election |
 | `types.ts` | 426 | Telegram API type definitions |
@@ -92,15 +92,15 @@ Once configured, run `/telegram setup` in Pi and paste your bot token.
 | `markdown.ts` | 311 | LLM markdown → Telegram HTML converter |
 | `media.ts` | 307 | Media download + processing pipeline |
 | `state.ts` | 280 | Centralized mutable state singleton |
-| `topics.ts` | 276 | Forum topic CRUD + session data persistence |
-| `session.ts` | 235 | Session labels, topic setup, auto-rename |
+| `topics.ts` | 286 | Forum topic CRUD + session data persistence |
+| `session.ts` | 216 | Session labels, topic setup, auto-rename |
 | `tools.ts` | 219 | `telegram_send_file` tool registration + file send logic |
 | `config.ts` | 196 | Config read/write/saveField |
 | `formatting.ts` | 136 | Content formatters, emoji/label/hint helpers |
 | `polling.ts` | 130 | Long-polling loop with backoff |
 | `relay-lock.ts` | 129 | PID-file lock for relay election |
 | `prompt.ts` | 71 | System prompt suffix builder |
-| `log.ts` | 37 | No-op logger (stdout is TUI) |
+| `log.ts` | 52 | `notify()`/`notifyWarn()` + file-based `debugLog()` |
 
 ### permissions
 

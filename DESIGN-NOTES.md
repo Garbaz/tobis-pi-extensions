@@ -50,7 +50,7 @@ The bot connects to **one Telegram chat** at a time (`lockToChat()`), but suppor
 - **General topic routing**: messages in the General topic are routed to the last active session, with a `\u{1F464}` echo in the session's topic and a `\u{1F440}` reaction on the original message.
 - **Multi-instance relay**: first pi instance becomes relay (poller + distributor), others connect as clients via Unix socket. PID-file election with failover on relay crash.
 - **Auto-connect**: only on resume/reload when `connected: true` in session data. New sessions require `/telegram connect`. Disconnect sets `connected: false` — preserving topic data but preventing auto-reconnect.
-- **Immediate topic creation** on connect (not lazy). Topics named from CWD basename, then renamed to `basename \u00B7 snippet` on first incoming message. `syncTopicName()` on `before_agent_start` + `agent_end` renames topic whenever Pi's session name changes. No DIY snippet extraction.
+- **Immediate topic creation** on connect (not lazy). Topics named from CWD basename, then renamed to `basename \u00B7 snippet` on first user message (via `input` event, works for both TUI and Telegram input). One-shot rename via `topicRenamed` flag. No `syncTopicName()` — topic name only changes once.
 
 ### Session Data Persistence
 

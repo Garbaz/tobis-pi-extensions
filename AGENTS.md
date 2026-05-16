@@ -61,7 +61,7 @@ Custom pi extensions by Tobi.
 | `types.ts` | Telegram API type definitions |
 | `schema.ts` | TypeBox config validation (loads `telegram.schema.json`) |
 | `prompt.ts` | System prompt suffix builder |
-| `log.ts` | No-op logger (stdout is TUI) |
+| `log.ts` | `notify()`/`notifyWarn()` + file-based `debugLog()` (`~/.pi/run/telegram/debug.log`) |
 
 ### Key design decisions
 
@@ -73,8 +73,8 @@ Custom pi extensions by Tobi.
 - **Auth**: whitelist/blacklist model. Unknown users get "waiting for authorization" + TUI notification. Blacklisted users silently ignored
 - **Bot commands**: `/status`, `/model`, `/new`, `/compact`, `/stop`
 - **Auto-connect only on resume/reload with `connected: true`** sentinel. New sessions require `/telegram connect`. Disconnect sets `connected: false` (preserving topic data)
-- **Immediate topic creation** on connect (not lazy). Topics named from CWD basename, then renamed to `basename \u00B7 snippet` on first incoming message. One-shot rename via `topicRenamed` flag.
+- **Immediate topic creation** on connect (not lazy). Topics named from CWD basename, then renamed to `basename \u00B7 snippet` on first user message (via `input` event, works for both TUI and Telegram input). One-shot rename via `topicRenamed` flag.
 - **Multi-instance relay**: first pi instance becomes relay (poller + distributor), others connect as clients via Unix socket
 - **Media processing**: `openai-stt`, `openai-chat`, `bash` protocols. Files always downloaded even without processor
 - **Turn buffer**: interleaved text blocks and tool lines, edited in-place for preview
-- **No `console.*`/`process.stdout`/`process.stderr`** — use `notify()` from `state.ts` (tries `ctx.ui.notify()`, falls back to stderr internally). Never write to stderr directly in extension code; the `notify()` function handles the fallback path.
+- **No `console.*`/`process.stdout`/`process.stderr`** — use `notify()` from `state.ts` (tries `ctx.ui.notify()`, falls back to stderr internally). For debug logging, use `debugLog()` from `log.ts` (appends to `~/.pi/run/telegram/debug.log`). Never write to stderr directly in production code; the `notify()` function handles the fallback path. Temporary debug stderr prints are OK during development but must be removed before committing.
