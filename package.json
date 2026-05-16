@@ -12,6 +12,11 @@
     "src",
     "README.md"
   ],
+  "scripts": {
+    "test": "npx tsx --test extensions/telegram/test-relay.ts extensions/telegram/test-session-registry.ts extensions/telegram/test-state.ts extensions/telegram/test-topics.ts extensions/telegram/test-outgoing.ts",
+    "test:integration": "npx tsx extensions/telegram/test-media.ts",
+    "typecheck": "npx tsc --noEmit"
+  },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
